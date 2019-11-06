@@ -1,6 +1,5 @@
-# change the following five lines
+# change the following four lines according to your install and source paths
 LIKWID_ROOT ?= /usr/local
-COLLECTD_VERSION ?= 5.9.0
 COLLECTD_ROOT ?= /usr/local/collectd/$(COLLECTD_VERSION)
 COLLECTD_SRC ?= /usr/local/sources/collectd-$(COLLECTD_VERSION)/src
 COLLECTD_BUILD_DIR ?= $(COLLECTD_SRC)/..
