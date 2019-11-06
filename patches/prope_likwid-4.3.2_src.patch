@@ -1,0 +1,88 @@
+diff -ruN src.save/access_x86_pci.c src/access_x86_pci.c
+--- src.save/access_x86_pci.c	2018-06-08 12:27:27.102602000 +0200
++++ src/access_x86_pci.c	2018-06-08 12:22:36.167475000 +0200
+@@ -209,12 +209,18 @@
+ void
+ access_x86_pci_finalize(const int socket)
+ {
+-    for (int j=1; j<MAX_NUM_PCI_DEVICES; j++)
++    if (access_x86_initialized)
+     {
+-        if (FD[socket][j] > 0)
++        for (int j=1; j<MAX_NUM_PCI_DEVICES; j++)
+         {
+-            close(FD[socket][j]);
++            if (FD[socket][j] > 0)
++            {
++                close(FD[socket][j]);
++                FD[socket][j] = -2;
++                pci_devices[j].online = 0;
++            }
+         }
++        access_x86_initialized = 0;
+     }
+ }
+ 
+diff -ruN src.save/includes/likwid.h src/includes/likwid.h
+--- src.save/includes/likwid.h	2018-06-08 12:27:26.979582000 +0200
++++ src/includes/likwid.h	2018-06-08 12:25:58.668437000 +0200
+@@ -727,6 +727,16 @@
+ @return Returns the ID of the new eventSet
+ */
+ extern int perfmon_addEventSet(const char* eventCString) __attribute__ ((visibility ("default") ));
++
++/*! \brief Set configuration of all performance monitoring counters of an eventSet
++ *  *
++ *   * A event string looks like Eventname:Countername(:Option1:Option2:...),...
++ *    * The eventname, countername and options are checked if they are available.
++ *     * @param [in] groupId (returned from perfmon_addEventSet()
++ *      * @return error code (-ENOENT if groupId is invalid and -1 if the counters of one CPU cannot be set up)
++ *       * */
++extern int perfmon_setCountersConfig(int groupId) __attribute__ ((visibility ("default") ));
++
+ /*! \brief Setup all performance monitoring counters of an eventSet
+ 
+ A event string looks like Eventname:Countername(:Option1:Option2:...),...
+diff -ruN src.save/perfmon.c src/perfmon.c
+--- src.save/perfmon.c	2018-06-08 12:27:27.098654000 +0200
++++ src/perfmon.c	2018-06-08 12:20:55.784452000 +0200
+@@ -1937,6 +1937,39 @@
+ }
+ 
+ int
++perfmon_setCountersConfig(int groupId)
++{
++    int i;
++    int ret = 0;
++    if (!lock_check())
++    {
++        ERROR_PLAIN_PRINT(Access to performance monitoring registers locked);
++        return -ENOLCK;
++    }
++    if (perfmon_initialized != 1)
++    {
++        ERROR_PLAIN_PRINT(Perfmon module not properly initialized);
++        return -EINVAL;
++    }
++    if (unlikely(groupSet == NULL))
++    {
++        return -EINVAL;
++    }
++
++    if (groupId >= groupSet->numberOfActiveGroups)
++    {
++        ERROR_PRINT(Group %d does not exist in groupSet, groupId);
++        return -ENOENT;
++    }
++
++    for(i=0;i<groupSet->numberOfThreads;i++)
++    {
++        memset(currentConfig[groupSet->threads[i].processorId], 0, NUM_PMC * sizeof(uint64_t));
++    }
++    return 0;
++}
++
++int
+ perfmon_setupCounters(int groupId)
+ {
+     int i;
