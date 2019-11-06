@@ -94,7 +94,7 @@ export COLLECTD_ROOT=/collectd/install/path
 export COLLECTD_SRC=/collectd/sources/src
 export COLLECTD_BUILD_DIR=/collectd/build/dir
 
-cd c; make`
+cd c; make
 ~~~~
 
 # Run collectd
@@ -103,4 +103,4 @@ For testing purposes collectd can be run in foreground with `-f`:
 $COLLECTD_INSTALL_PATH/sbin/collectd -f -C $PATH_TO_COLLECTD_CONF/collectd.conf
 ~~~~
 
-A sample configuration file for collectd is in the top directory.
+There is a sample configuration file for collectd in the top directory of this repo (*collectd_prope.conf*).
