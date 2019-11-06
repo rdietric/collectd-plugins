@@ -87,7 +87,7 @@ cd ..
 ## Plugins
 Only the C plugin(s) have to be build.
 
-Build die Likwid plugin:
+Build Likwid plugin:
 ~~~~
 export LIKWID_ROOT=/likwid/install/path
 export COLLECTD_ROOT=/collectd/install/path
@@ -96,3 +96,11 @@ export COLLECTD_BUILD_DIR=/collectd/build/dir
 
 cd c; make`
 ~~~~
+
+# Run collectd
+For testing purposes collectd can be run in foreground with `-f`:
+~~~~
+$COLLECTD_INSTALL_PATH/sbin/collectd -f -C $PATH_TO_COLLECTD_CONF/collectd.conf
+~~~~
+
+A sample configuration file for collectd is in the top directory.
