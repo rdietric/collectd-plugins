@@ -56,4 +56,4 @@ Import "influx_write"
 ~~~~
 
 # Dummy collectd
-Enables testing and debugging of collectd python plugins without and installation of collectd.
+Enables testing and debugging of collectd python plugins without installation of collectd.
