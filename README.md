@@ -14,6 +14,28 @@ To plugins have been developed for collectd 5.9.0. However, they should work wit
 ## Python
 The Python plugins are written for Python3. 
 
+Build Python from sources (including InfluxDB and NVML modules):
+~~~~
+# get Python3 sources
+wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz
+tar xvfJ Python-${PYTHON_VERSION}.tar.xz
+
+# install Python
+cd Python-${PYTHON_VERSION}
+./configure --prefix=${DEST_INST} --with-ensurepip=install --enable-shared #--enable-optimizations
+make -j; make install
+cd ..
+
+export PATH=${DEST_INST}/bin:$PATH
+export LD_LIBRARY_PATH=${DEST_INST}/lib:${DEST_INST}/lib/python3.7:$LD_LIBRARY_PATH
+
+pip3 install --upgrade pip
+
+# install InfluxDB and NVML modules
+pip3 install influxdb
+pip3 install nvidia-ml-py # need for the collectd GPU-CUDA (NVML) plugin
+~~~~
+
 ## Collectd
 A fix for the CUDA-GPU (NVML) plugin and the new *StartRead* setting is available with the branch *prope* of https://github.com/rdietric/collectd.git.
 
@@ -57,4 +79,15 @@ sed -i "/^ACCESSMODE = .*/ s|.*|ACCESSMODE = perf_event|" config.mk
 sed -i "/^BUILDDAEMON = .*/ s|.*|BUILDDAEMON = false|" config.mk
 make -j4; make install
 cd ..
+~~~~
+
+## Plugins
+Only the C plugin(s) have to be build.
+~~~~
+export LIKWID_ROOT=/likwid/install/path
+export COLLECTD_ROOT=/collectd/install/path
+export COLLECTD_SRC=/collectd/sources/src
+export COLLECTD_BUILD_DIR=/collectd/build/dir
+
+cd c; make`
 ~~~~
