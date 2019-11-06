@@ -63,6 +63,10 @@ export C_INCLUDE_PATH=$PWD/src:$PWD/src/daemon:$CUDA_PATH/include:$C_INCLUDE_PAT
 make -j; make install
 ~~~~
 
+There are open pull request for the StartRead setting and an improvement for the CUDA-GPU (NVML) plugin:
+https://github.com/collectd/collectd/pull/3327  
+https://github.com/collectd/collectd/pull/3264
+
 ## LIKWID
 Likwid is available at https://github.com/RRZE-HPC/likwid.git. You can also use a release version.
 
