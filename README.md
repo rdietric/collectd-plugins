@@ -8,8 +8,7 @@
 * InfluxDB (Python)
 
 # Installation (Requirements)
-To plugins have been developed for collectd 5.9.0. However, they should work with other versions of collectd. Make sure that Python is available before installing collectd.
-
+To plugins have been developed for collectd 5.9.0. However, they should work with other versions of collectd. Make sure that Python is available before installing collectd. If you have an existing Python 3 installation, it should be sufficient to install influxdb and nvidia-ml-py via pip3.
 
 ## Python
 The Python plugins are written for Python3. 
@@ -42,7 +41,7 @@ A fix for the CUDA-GPU (NVML) plugin and the new *StartRead* setting is availabl
 If you use a release version of collectd, the *StartRead* setting will not work. 
 StartRead defines for each read plugin, when the first read operation should take place. It is given seconds. Values between 0 and 59 define the start second in a minute and values greater or equal 60 the minute in an hour. The fraction (value after the dot) defines the millisecond of a second.
 
-Build from modified sources:
+Build collectd from sources:
 ~~~~
 # get collectd sources
 git clone https://github.com/rdietric/collectd.git
@@ -68,7 +67,7 @@ https://github.com/collectd/collectd/pull/3327
 https://github.com/collectd/collectd/pull/3264
 
 ## LIKWID
-Likwid is available at https://github.com/RRZE-HPC/likwid.git. You can also use a release version.
+Likwid is available at https://github.com/RRZE-HPC/likwid.git. You can also use a release version and apply a patch in the folder *patches* (if available).
 
 ~~~~
 # get likwid sources
@@ -87,11 +86,21 @@ cd ..
 
 ## Plugins
 Only the C plugin(s) have to be build.
+
+Build Likwid plugin:
 ~~~~
 export LIKWID_ROOT=/likwid/install/path
 export COLLECTD_ROOT=/collectd/install/path
 export COLLECTD_SRC=/collectd/sources/src
 export COLLECTD_BUILD_DIR=/collectd/build/dir
 
-cd c; make`
+cd c; make
 ~~~~
+
+# Run collectd
+For testing purposes collectd can be run in foreground with `-f`:
+~~~~
+$COLLECTD_INSTALL_PATH/sbin/collectd -f -C $PATH_TO_COLLECTD_CONF/collectd.conf
+~~~~
+
+There is a sample configuration file for collectd in the top directory of this repo (*collectd_prope.conf*).
