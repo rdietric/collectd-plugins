@@ -1,4 +1,4 @@
-# Python and C plugins for collectd
+# Additional Python and C plugins for collectd
 ## Read plugins
 * LIKWID (C)
 * Infiniband send and receive bandwidth (Python)
@@ -83,6 +83,10 @@ sed -i "/^BUILDDAEMON = .*/ s|.*|BUILDDAEMON = false|" config.mk
 make -j4; make install
 cd ..
 ~~~~
+
+## InfluxDB
+Download a package from https://portal.influxdata.com/downloads/ and install it according to the instructions.
+Add the InfluxDB module to your Python 3 installation with `pip3 install influxdb`
 
 ## Plugins
 Only the C plugin(s) have to be build.
