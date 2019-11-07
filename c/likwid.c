@@ -306,7 +306,7 @@ static int _submit_value(const char* measurement, const char* metric, int cpu, d
   sstrncpy(vl.type_instance, metric, sizeof(vl.type_instance));
   snprintf(vl.plugin_instance, sizeof(vl.plugin_instance), "%i", cpu);
 
-  INFO(PLUGIN_NAME ": dispatch: %s:%s(%d)=%lf", measurement, metric, cpu, value);
+  //INFO(PLUGIN_NAME ": dispatch: %s:%s(%d)=%lf", measurement, metric, cpu, value);
 
   plugin_dispatch_values(&vl);
 }
@@ -314,7 +314,7 @@ static int _submit_value(const char* measurement, const char* metric, int cpu, d
 static int likwid_plugin_read(void) {
   cdtime_t time = cdtime() + mcdTime * numGroups;
   
-  INFO(PLUGIN_NAME ": %s:%d (timestamp: %.3f)", __FUNCTION__, __LINE__, CDTIME_T_TO_DOUBLE(time));
+  //INFO(PLUGIN_NAME ": %s:%d (timestamp: %.3f)", __FUNCTION__, __LINE__, CDTIME_T_TO_DOUBLE(time));
   
   // read from likwid
   for(int g = 0; g < numGroups; g++) {
@@ -336,7 +336,8 @@ static int likwid_plugin_read(void) {
 
     //int nmetrics = perfmon_getNumberOfMetrics(gid);
     int nmetrics = metricGroups[g].numMetrics;
-    INFO(PLUGIN_NAME ": Measured %d metrics for %d CPUs for group %s (%d sec)", nmetrics, numCPUs, metricGroups[g].name, mTime);
+    
+    //INFO(PLUGIN_NAME ": Measured %d metrics for %d CPUs for group %s (%d sec)", nmetrics, numCPUs, metricGroups[g].name, mTime);
 
     // for all active hardware threads
     for(int c = 0; c < numCPUs; c++) {
@@ -444,7 +445,7 @@ static int likwid_plugin_finalize( void )
   topology_finalize();
 
   // free memory where CPU IDs are stored
-  INFO(PLUGIN_NAME ": free allocated memory");
+  //INFO(PLUGIN_NAME ": free allocated memory");
   if(NULL != cpus)
   {
     free(cpus);

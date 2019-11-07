@@ -20,9 +20,9 @@ influx = None
 
 hostname = 'localhost'
 port = 8086
-username = 'admin'
-password = 'prope18!'
-database = 'prope'
+username = 'user'
+password = 'pwd'
+database = 'db'
 divide_cpu_used_by_100 = False
 
 batch_count = 0
@@ -310,7 +310,7 @@ def _send_one_value_per_line():
         if str(value) == "nan" or math.isnan(float(value)):
           value = 0
 
-        collectd.info("%s:%s %f at %s, host %s" % (value_obj.plugin, value_obj.type_instance, value, value_obj.time, value_obj.host))
+        #collectd.info("%s:%s %f at %s, host %s" % (value_obj.plugin, value_obj.type_instance, value, value_obj.time, value_obj.host))
 
         metrics.append({
           "measurement": mname,
@@ -427,7 +427,7 @@ def _send_multiple_values_per_line():
             if last_cpu != "":
               last_tags["cpu"] = last_cpu
               
-            collectd.info("Data point: %s:%d, tags: %s, fields: %s" % (measurement, int(last_valueList.time), str(last_tags), str(fields)))
+            #collectd.info("Data point: %s:%d, tags: %s, fields: %s" % (measurement, int(last_valueList.time), str(last_tags), str(fields)))
             
             metrics.append({
                 "measurement": measurement,
@@ -451,7 +451,7 @@ def _send_multiple_values_per_line():
       #elif 'cpu' in tags:
       #  tags["cpu"] = last_cpu.replace("cpu","")
         
-      collectd.info("Remaining data point: %s:%d, tags: %s, fields: %s" % (measurement, int(last_valueList.time), str(tags), str(fields)))
+      #collectd.info("Remaining data point: %s:%d, tags: %s, fields: %s" % (measurement, int(last_valueList.time), str(tags), str(fields)))
       metrics.append({
           "measurement": measurement,
           "time": int(last_valueList.time),
