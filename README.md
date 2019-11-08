@@ -109,3 +109,23 @@ $COLLECTD_INSTALL_PATH/sbin/collectd -f -C $PATH_TO_COLLECTD_CONF/collectd.conf
 ~~~~
 
 There is a sample configuration file for collectd in the top directory of this repo (*collectd_prope.conf*). Before running collectd, paths in this file have to be adapted, e.g. the path to `custom_types.db`, which is needed for the likwid plugin. You should also disable plugins (comment out), where the resources are not available on the system, e.g. lustre and infiniband, if you are working on your own notebook.
+
+## Likwid
+If you use Likwid with perf_event as access mode, you may not have permission to collect metrics. 
+If this happens, you can set perf_event_paranoid to 0.
+
+`sh -c 'echo 0 >/proc/sys/kernel/perf_event_paranoid'`
+
+See https://www.kernel.org/doc/Documentation/sysctl/kernel.txt
+
+> perf_event_paranoid:
+> 
+> Controls use of the performance events system by unprivileged
+> users (without CAP_SYS_ADMIN).  The default value is 2.
+> 
+>  -1: Allow use of (almost) all events by all users
+>      Ignore mlock limit after perf_event_mlock_kb without CAP_IPC_LOCK
+> >=0: Disallow ftrace function tracepoint by users without CAP_SYS_ADMIN
+>      Disallow raw tracepoint access by users without CAP_SYS_ADMIN
+> >=1: Disallow CPU event access by users without CAP_SYS_ADMIN
+> >=2: Disallow kernel profiling by users without CAP_SYS_ADMIN
