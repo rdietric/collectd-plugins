@@ -112,20 +112,8 @@ There is a sample configuration file for collectd in the top directory of this r
 
 ## Likwid
 If you use Likwid with perf_event as access mode, you may not have permission to collect metrics. 
-If this happens, you can set perf_event_paranoid to 0.
+If this happens, you can set perf_event_paranoid to 0 (requires root privileges).
 
 `sh -c 'echo 0 >/proc/sys/kernel/perf_event_paranoid'`
 
 See https://www.kernel.org/doc/Documentation/sysctl/kernel.txt
-
-> perf_event_paranoid:
-> 
-> Controls use of the performance events system by unprivileged
-> users (without CAP_SYS_ADMIN).  The default value is 2.
-> 
->  -1: Allow use of (almost) all events by all users
->      Ignore mlock limit after perf_event_mlock_kb without CAP_IPC_LOCK
-> >=0: Disallow ftrace function tracepoint by users without CAP_SYS_ADMIN
->      Disallow raw tracepoint access by users without CAP_SYS_ADMIN
-> >=1: Disallow CPU event access by users without CAP_SYS_ADMIN
-> >=2: Disallow kernel profiling by users without CAP_SYS_ADMIN
