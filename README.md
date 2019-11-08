@@ -71,10 +71,11 @@ Likwid is available at https://github.com/RRZE-HPC/likwid.git. You can also use 
 
 ~~~~
 # get likwid sources
-wget https://github.com/RRZE-HPC/likwid/archive/likwid-4.3.3.tar.gz
-tar xfz likwid-4.3.3.tar.gz
-cd likwid-4.3.3
-patch -p0 < $PATH_TO_PATCH/prope_likwid-4.3.3_src.patch
+LIKWID_VERSION=4.3.3
+wget https://github.com/RRZE-HPC/likwid/archive/likwid-${LIKWID_VERSION}.tar.gz
+tar xfz likwid-${LIKWID_VERSION}.tar.gz
+cd likwid-likwid-${LIKWID_VERSION}
+patch -p0 < $PATH_TO_PATCH/prope_likwid-${LIKWID_VERSION}_src.patch
 
 # set Likwid install path ($LIKWID_INST_PATH), perf_event as counter source and disable building the access daemon
 sed -i "/^PREFIX = .*/ s|.*|PREFIX = $LIKWID_INST_PATH|" config.mk
