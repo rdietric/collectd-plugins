@@ -7,14 +7,45 @@
 
 #include <likwid.h>
 
+#ifdef TEST_LIWKID
+
+#include <strings.h>
+
+#define STATIC_ARRAY_SIZE(a) (sizeof(a) / sizeof(*(a)))
+
+#define TIME_T_TO_CDTIME_T(t) t
+/* Type for time as used by "utils_time.h" */
+typedef uint64_t cdtime_t;
+
+#define ERROR(...) plugin_log(0, __VA_ARGS__)
+#define WARNING(...) plugin_log(0, __VA_ARGS__)
+#define NOTICE(...) plugin_log(0, __VA_ARGS__)
+#define INFO(...) plugin_log(0, __VA_ARGS__)
+void plugin_log(int level, const char *format, ...) {
+  char msg[1024];
+  va_list ap;
+  va_start(ap, format);
+  vsnprintf(msg, sizeof(msg), format, ap);
+  msg[sizeof(msg) - 1] = '\0';
+  va_end(ap);
+  fprintf(stderr, "%s\n", msg);
+}
+
+typedef void* notification_t;
+typedef void* user_data_t;
+
+#else
+
 // headers required for collectd
 #include "collectd.h"
-#include "common.h" /* auxiliary functions */
+#include "common.h" /* collectd auxiliary functions */
 #include "plugin.h" /* plugin_register_*, plugin_dispatch_values */
+
+#endif
 
 #define PLUGIN_NAME "likwid"
 
-static int  accessMode = 0;
+static int  accessMode = 0; // direct access
 static int  mTime = 15;       /**< Measurement time per group in seconds */
 static cdtime_t mcdTime = 0;// TIME_T_TO_CDTIME_T(15);
 static int  startSecond = 20;
@@ -99,8 +130,7 @@ void _setupGroups()
       if(gid < 0)
       {
         metricGroups[g].id = -2;
-        INFO(PLUGIN_NAME ": Failed to add group %s to LIKWID perfmon module", 
-            metricGroups[g].name);
+        INFO(PLUGIN_NAME ": Failed to add group %s to LIKWID perfmon module (return code: %d)", metricGroups[g].name, gid);
       }
       else
       {
@@ -284,6 +314,12 @@ static bool _isSocketInfoCore(int cpu_idx)
   return false;
 }
 
+#ifdef TEST_LIWKID
+
+
+
+#else
+
 // host "/" plugin ["-" plugin instance] "/" type ["-" type instance]
 // e.g. taurusi2001/likwid_socket-0/cpi
 // plugin field stores the measurement name (likwid_cpu or likwid_socket)
@@ -405,6 +441,7 @@ static int likwid_plugin_read(void) {
 
   return 0;
 }
+#endif
 
 static int likwid_plugin_init(void)
 {
@@ -418,11 +455,6 @@ static int likwid_plugin_init(void)
   _setupGroups();
   
   return ret;
-}
-
-static int likwid_plugin_flush(cdtime_t timeout, const char *identifier, user_data_t *usr )
-{
-  
 }
 
 /*! brief Resets the likwid group counters
@@ -548,7 +580,8 @@ static int likwid_plugin_config (const char *key, const char *value)
     
     i = 0;
     char *grp_ptr;
-    grp_ptr = strtok((char*)value, &separator);
+    char* myvalue = mystrdup(value); // need a copy as strtok modifies the first argument
+    grp_ptr = strtok(myvalue, &separator);
     while( grp_ptr != NULL )
     {
       // save group name
@@ -586,8 +619,8 @@ static int likwid_plugin_config (const char *key, const char *value)
 
     // tokenize the string by separator
     i = 0;
-    char *metric_ptr;
-    metric_ptr = strtok((char*)value, &separator);
+    char* myvalue = mystrdup(value); // need a copy as strtok modifies the first argument
+    char *metric_ptr = strtok(myvalue, &separator);
     while( metric_ptr != NULL )
     {
       // save metric name
@@ -604,6 +637,8 @@ static int likwid_plugin_config (const char *key, const char *value)
   return 0;
 }
 
+#ifndef TEST_LIWKID
+
 /*
  * This function is called after loading the plugin to register it with collectd.
  */
@@ -612,7 +647,34 @@ void module_register(void) {
   plugin_register_read(PLUGIN_NAME, likwid_plugin_read);
   plugin_register_init(PLUGIN_NAME, likwid_plugin_init);
   plugin_register_shutdown(PLUGIN_NAME, likwid_plugin_finalize);
-  plugin_register_flush(PLUGIN_NAME, likwid_plugin_flush, /* user data = */ NULL);
   plugin_register_notification(PLUGIN_NAME, likwid_plugin_notify, /* user data = */ NULL);
   return;
 }
+
+#else
+
+int main(int argc, char *argv[]) {
+  // assume first argument to be the event group
+  if( argc > 1 ) {
+    printf("Use group(s) %s\n", argv[1]);
+    likwid_plugin_config ("Groups", argv[1]);
+  }
+  else
+  {
+    likwid_plugin_config ("Groups", "BRANCH");
+  }
+  
+  likwid_plugin_config ("PerSocketMetrics", "mem_bw,rapl_power");
+
+  // initialize LIKWID
+  _init_likwid();
+
+  _setupGroups();
+
+  // finalize LIKWID
+  likwid_plugin_finalize();
+
+  return 0;
+}
+
+#endif
