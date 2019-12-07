@@ -656,8 +656,16 @@ void module_register(void) {
 int main(int argc, char *argv[]) {
   // assume first argument to be the event group
   if( argc > 1 ) {
-    printf("Use group(s) %s\n", argv[1]);
-    likwid_plugin_config ("Groups", argv[1]);
+    for(int i = 1; i < argc; i++)
+    {
+      if (strncmp(argv[i], "-v", 2) == 0){
+        likwid_verbose = atoi(argv[i]+2);
+        fprintf(stderr, "Set LIKWID verbose level to %d\n", likwid_verbose);
+      }else if (strncmp(argv[i], "-g", 2) == 0){
+        fprintf(stderr, "Use group(s) %s\n", argv[i]+2);
+        likwid_plugin_config ("Groups", argv[i]+2);
+      }
+    }
   }
   else
   {
