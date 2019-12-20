@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 # coding=utf-8
 
 """
@@ -39,14 +40,14 @@ _KEY_MAPPING = [
   'create',
   'seek'
 ]
+
+DEFAULT_LUSTRE_SEARCH_PATHS=['/sys/kernel/debug/lustre/llite/','/proc/fs/lustre/llite/']
 ### END: constants ###
 
 ### global variables ###
 enabled = False
 
 lustre_paths = None
-
-extents_stats = False
 
 time_prev = 0
 
@@ -65,24 +66,29 @@ def _getLustreFileSystemPaths():
     return lustre_paths.split(',')
   else:
     # find file systems
-    #cmd = 'find /proc/fs/lustre/llite/* -maxdepth 0 -type d 2>/dev/null'
-    cmd = 'ls /proc/fs/lustre/llite/'
-    try:
-      p = subprocess.Popen( cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE )
-      stdout, stderr = p.communicate()
-    except subprocess.CalledProcessError as e:
-      collectd.info("[Lustre Plugin] %s error launching: %s; skipping" % (repr(e), cmd))
-      return []
-    else:
-      stdout= stdout.decode('utf-8')
+    #cmd = 'find ' + DEFAULT_LUSTRE_SEARCH_PATH + '* -maxdepth 0 -type d 2>/dev/null'
+    # list the full paths
+    for searchPath in DEFAULT_LUSTRE_SEARCH_PATHS:
+      if not os.path.exists(searchPath):
+        continue
+      cmd = 'ls -d ' + searchPath + '*'
+      try:
+        p = subprocess.Popen( cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE )
+        stdout, stderr = p.communicate()
+      except subprocess.CalledProcessError as e:
+        collectd.info("[Lustre Plugin] %s error launching: %s; skipping" % (repr(e), cmd))
+        return []
+      else:
+        stdout= stdout.decode('utf-8')
 
-    if stdout == '':
-      return []
+      if stdout == '':
+        collectd.info("[Lustre Plugin] No file systems found: %s" % (cmd,))
+        return []
 
-    collectd.debug("[Lustre Plugin] Found lustre file system paths: %s" % (stdout,))
-    
-    fsArray = stdout.split('\n')
-    fsArray.remove("") # remove empty string
+      collectd.info("[Lustre Plugin] Found lustre file system paths: %s" % (stdout,))
+      
+      fsArray = stdout.split('\n')
+      fsArray.remove("") # remove empty string
 
     return fsArray
 
@@ -99,22 +105,23 @@ def _setupLustreFiles():
 
     # no '/' found
     if p_start == -1:
+      collectd.info("[Lustre Plugin] no start slash")
       continue
 
     # mn '-' found
     if p_end == -1:
       p_end = fsPath.len()
 
-    collectd.debug("[Lustre Plugin] Collect data for file system: %s" % (fsPath[p_start+1:p_end],))
+    collectd.info("[Lustre Plugin] Collect data for file system: %s" % (fsPath[p_start+1:p_end],))
 
-    fsInfo.append( fsPath ) # full path to the file system /proc information files
+    fsInfo.append( fsPath + '/stats' ) # full path to the Lustre stats file
     fsInfo.append( fsPath[ p_start + 1 : p_end ] ) # name of file system, e.g. scratch
     fsInfo.append( False ) # first, disable the file system
 
     # append array entry for lustre offset dictionary
     fsInfo.append( {} )
 
-  collectd.debug("[Lustre Plugin] Found %d file systems" % (len(fsInfo) / FS_ENTRIES,))
+  #collectd.info("[Lustre Plugin] Found %d file systems" % (len(fsInfo) / FS_ENTRIES,))
 
   # gather first/prev values
   if len(fsInfo) > 0:
@@ -129,20 +136,19 @@ def _setupLustreFiles():
 # set initial values for each file system
 def _setPrevValues():
   global enabled
-  for idx in xrange( 0, len(fsInfo)-1, FS_ENTRIES):
-    fs = fsInfo[ idx ]
+  for idx in range( 0, len(fsInfo)-1, FS_ENTRIES):
+    statsFile = fsInfo[ idx ]
     
-    if not fs:
+    if not statsFile:
       continue
       
     # add lustre stats offsets
-    statFile = fs + "/stats"
     try:
-      f = open( statFile, "r" )
+      f = open( statsFile, "r" )
       finput = f.read()
       f.close()
     except IOError as ioe:
-      collectd.debug( "[Lustre Plugin] Cannot read from stats file: %s" % (repr(ioe),))
+      collectd.info( "[Lustre Plugin] Cannot read from stats file: %s (%s)" % (statsFile, repr(ioe),))
       fsInfo[ idx + POS_ENABLED ] = False
       continue
     else:
@@ -151,32 +157,17 @@ def _setPrevValues():
       stats_offsets = _parseLustreStats( finput )
       fsInfo[ idx + POS_PREV_DATA ].update( stats_offsets )
 
-    # add lustre extents_stats offsets
-    if extents_stats:
-      statFile = fs + "/extents_stats"
-      try:
-        f = open( statFile, "w+" )
-        finput = f.readline()
-        if finput.startswith("disabled"):
-          f.write("1")
-          collectd.debug("[Lustre Plugin] Enabled extents_stats for %s" % (fs,))
-        f.close()
-      except IOError as ioe:
-        collectd.debug("[Lustre Plugin] Cannot read/enable extents_stats: %s" % (repr(ioe),))
-      else:
-        fsInfo[ idx + POS_PREV_DATA ].update(_parseLustreExtendsStats(finput))
-
     # store timestamp of previous data
     global time_prev
     time_prev = time.time()
         
 # check if there are file systems available, which are not monitored yet
 def _haveNewFS():        
-  #self.log.debug( "New lustre FS? %s", self._getLustreFileSystemPaths() )
-  for fsPathNew in _getLustreFileSystemPaths():        
+  #collectd.debug( "New lustre FS? %s", _getLustreFileSystemPaths() )
+  for fsPathNew in _getLustreFileSystemPaths():
     newFS=True
-    # mark the FS as not new, if it is the current list
-    for idx in xrange( 0, len(fsInfo)-1, FS_ENTRIES):
+    # mark the FS as not new, if it is in the current list
+    for idx in range( 0, len(fsInfo)-1, FS_ENTRIES):
       fsPathCurr = fsInfo[ idx ]
       
       if fsPathCurr == fsPathNew:
@@ -184,10 +175,22 @@ def _haveNewFS():
         break
     
     if newFS:
-      collectd.debug("[Lustre Plugin] Found new file system %s!" % (fsPathNew,))
+      collectd.info("[Lustre Plugin] Found new file system %s!" % (fsPathNew,))
       return True
     
   return False
+
+# Check for the existence of the stats files
+def _checkLustreStatsFiles():
+  # iterate over file system info list in steps of FS_ENTRIES
+  for idx in range( 0, len(fsInfo)-1, FS_ENTRIES):
+    # disable file system, if stats file does not exist
+    if not os.path.isfile(fsInfo[idx]):
+      fsInfo[idx + POS_ENABLED] = False
+      collectd.warning("[Lustre Plugin] %s does not exist. Disable file system monitoring." % (fsInfo[idx],))
+    elif fsInfo[idx + POS_ENABLED] == False:
+      fsInfo[idx + POS_ENABLED] = True
+      collectd.info("[Lustre Plugin] %s re-enable." % (fsInfo[idx],))
 
 # Parse the lustre stats file
 # return dictionary with metric names (key) and value (value)
@@ -207,51 +210,17 @@ def _parseLustreStats(finput):
 
   return lustrestat
 
-# parse the input from lustre extents_stats file
-# return dictionary with metric names (key) and value (value)
-def _parseLustreExtendsStats(finput):
-  lustrestat = {}
-  for line in filter(None, finput.split('\n')):
-    #self.log.debug(line)
-    # split (by whitespace) into array
-    values = line.split() #split is faster than re.split
-
-    #ignore non-values lines (value lines have 11 values)
-    #if pattern_value.match(line): #savely identify values lines
-    if len(values) != 11:  #fast access values lines
-      continue
-
-    #self.log.debug(values)
-    try:
-      # reads
-      value = float(values[4])
-      if value > 0:
-          lustrestat[ "read_"+values[0]+"-"+values[2] ] = value
-
-      # writes
-      value = float(values[8])
-      if value > 0:
-          lustrestat[ "write_"+values[0]+"-"+values[2] ] = value
-    except ValueError as ve:
-      collectd.error("[Lustre Plugin] Could not convert to float (%s)" % (repr(ve),))
-
-  return lustrestat
-
 def _publishLustreMetrics(fsIdx, lustreMetrics, timestamp): 
     fsname   = fsInfo[ fsIdx + POS_FSNAME ]
     previous = fsInfo[ fsIdx + POS_PREV_DATA ]
 
-    # append file system name to metric name (to further specify measurements)
-    fsname = '<' + fsname + '>'
-
     interval = timestamp - time_prev
 
-    # for all lustre metrics
-    for metric in lustreMetrics.keys():
-      #self.log.debug( "lustre_" + fsname + "_" + metric )
-      
-      # determine bandwidth
-      if previous.has_key( metric ):
+    # for all lustre metrics (iterate over keys)
+    for metric in lustreMetrics:      
+      ### determine bandwidth manually ###
+      # check for a previous value
+      if metric in previous:
           currValue = lustreMetrics[ metric ] - previous[ metric ]
           #self.log.debug( "Current value: %d (%d - %d)", currValue, lustreMetrics[ metric ], previous[ metric ] )
       else:
@@ -265,13 +234,12 @@ def _publishLustreMetrics(fsIdx, lustreMetrics, timestamp):
         # TODO: change to derive type, no need to store prev values
         vl = collectd.Values(type='gauge')
         vl.plugin='lustre_' + fsname
-        vl.type='lustre'
         vl.values = [float(currValue) / float(interval)]
         vl.time = timestamp
         vl.type_instance = metric
         vl.dispatch()
       else:
-        collectd.debug("[Lustre Plugin] %d: derivative < 0 (current: %f, previous available? %s" % (timestamp, lustreMetrics[ metric ], previous.has_key( metric )))
+        collectd.debug("[Lustre Plugin] %d: derivative < 0 (current: %f, previous available? %s" % (timestamp, lustreMetrics[ metric ], metric in previous))
 
 def lustre_plugin_config(config):
   if config.values[0] == 'lustre_bw':
@@ -281,10 +249,6 @@ def lustre_plugin_config(config):
         global lustre_paths
         lustre_paths = value.values[0]
         collectd.info("[Lustre Plugin] Paths to lustre file systems: %s" % (lustre_path,))
-      elif value.key == 'extents_stats':
-        global extents_stats
-        extents_stats = value.values[0]
-        collectd.info("[Lustre Plugin] extents_stats: %s" % (extents_stats,))
       elif value.key == 'recheck_limit':
         global recheck_limit
         recheck_limit = int(value.values[0])
@@ -300,6 +264,8 @@ def lustre_plugin_initialize():
   # setup lustre file paths and initialize previous values
   _setupLustreFiles()
 
+  _checkLustreStatsFiles()
+
 
 """
 brief Read send and receive counters from Infiniband devices
@@ -312,10 +278,13 @@ def lustre_plugin_read(data=None):
   num_reads += 1
   
   # check for available file systems
-  if num_reads == recheck_limit: 
+  if num_reads == recheck_limit:
     if _haveNewFS():
       _setupLustreFiles()
+      _checkLustreStatsFiles()
       return
+    else:
+      _checkLustreStatsFiles()
         
     # reset check counter
     num_reads = 0
@@ -330,43 +299,28 @@ def lustre_plugin_read(data=None):
 
   # iterate over file system info list in steps of FS_ENTRIES (as we have FS_ENTRIES entries per file system)
   #self.log.debug("[LustreCollector] %d, %d", len(self.fsInfo)-1, FS_ENTRIES)
-  for idx in xrange( 0, len(fsInfo)-1, FS_ENTRIES):
+  for idx in range( 0, len(fsInfo)-1, FS_ENTRIES):
     # skip disabled file systems
     if fsInfo[ idx + POS_ENABLED ] == False:
       continue
 
-    fs = fsInfo[ idx ]
-    if not fs:
+    statsFile = fsInfo[ idx ]
+    if not statsFile:
       continue
 
     #self.log.debug("[LustreCollector] Collect from lustre %s (idx: %d), %d metrics", fs, idx, len(self.fsInfo[idx+2]))
-    statFile = fs + "/stats"
     try:
-      f = open( statFile, "r" )
+      f = open( statsFile, "r" )
       finput = f.read()
       f.close()
     except IOError as ioe:
-      collectd.debug("[Lustre Plugin] Cannot read from stats file: %s" % (repr(ioe),))
+      collectd.error("[Lustre Plugin] Cannot read stats file: %s (%s)" % (statsFile, repr(ioe)))
     else:
       # parse the data into dictionary (key is metric name, value is metric value)
       lustrestat = _parseLustreStats( finput )
 
       # publish the metrics
       _publishLustreMetrics( idx, lustrestat, timestamp )
-
-    if extents_stats:
-      statFile = fs + "/extents_stats"
-      try:
-          f = open( statFile, 'r' )
-          finput = f.read()
-          f.close()
-      except IOError as ioe:
-        collectd.debug( "[Lustre Plugin] Cannot read from extents_stats file: %s" % (repr(ioe),))
-      else:
-        # parse the data into dictionary (key is metric name, value is metric value)
-        lustrestat = _parseLustreExtendsStats( finput )
-
-        _publishLustreMetrics( idx, lustrestat, timestamp )
 
   global time_prev
   time_prev = timestamp
@@ -381,6 +335,8 @@ def lustre_plugin_notify(notification, data=None):
     collectd.info("[Lustre Plugin] Check Lustre files ...")
     if _haveNewFS():
       _setupLustreFiles()
+    
+    _checkLustreStatsFiles()
         
     # reset check counter
     global num_reads
