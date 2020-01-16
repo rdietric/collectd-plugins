@@ -64,6 +64,8 @@ static double* flopsValues = NULL; /**< storage to normalize FLOPS values flopsV
 static int numSockets = 0;
 static int* socketInfoCores = NULL;
 
+static bool plugin_disabled = false;
+
 /*! \brief Metric type */
 typedef struct metric_st {
   char* name;     /*!< metric name */
@@ -234,7 +236,7 @@ static int _init_likwid(void)
   double timer = 0.0;
   CpuInfo_t cpuinfo = get_cpuInfo();
   CpuTopology_t cputopo = get_cpuTopology();
-  numCPUs = cputopo->activeHWThreads;
+  numCPUs = cputopo->numHWThreads;
   cpus = malloc(numCPUs * sizeof(int));
   if(!cpus)
   {   
@@ -244,19 +246,13 @@ static int _init_likwid(void)
       return 1;
   }
 
-  int c = 0;
   for(int i = 0; i < cputopo->numHWThreads; i++)
   {   
-      if (cputopo->threadPool[i].inCpuSet)
-      {   
-          cpus[c] = cputopo->threadPool[i].apicId;
-          c++;
-      }
+    cpus[i] = cputopo->threadPool[i].apicId;
   }
 
   // get socket information
   numSockets = cputopo->numSockets;
-  uint32_t coresPerSocket = cputopo->numCoresPerSocket;
   socketInfoCores = malloc(numSockets*sizeof(int));
   if(NULL == socketInfoCores)
   {
@@ -265,7 +261,7 @@ static int _init_likwid(void)
   }
   for(int s = 0; s < numSockets; s++)
   {
-    socketInfoCores[s] = s*coresPerSocket;
+    socketInfoCores[s] = s * cputopo->numCoresPerSocket * cputopo->numThreadsPerCore;
     INFO(PLUGIN_NAME ": Collecting per socket metrics for core: %d", socketInfoCores[s]);
   }
 
@@ -279,7 +275,7 @@ static int _init_likwid(void)
 
 static void _resetCounters(void)
 {
-  INFO(PLUGIN_NAME ": Set counters configuration!");
+  INFO(PLUGIN_NAME ": (Re)set counters configuration for %d groups!", numGroups);
 
   for(int g = 0; g < numGroups; g++)
   {
@@ -348,6 +344,10 @@ static int _submit_value(const char* measurement, const char* metric, int cpu, d
 }
 
 static int likwid_plugin_read(void) {
+  if( plugin_disabled ) {
+    return 0;
+  }
+
   cdtime_t time = cdtime() + mcdTime * numGroups;
   
   //INFO(PLUGIN_NAME ": %s:%d (timestamp: %.3f)", __FUNCTION__, __LINE__, CDTIME_T_TO_DOUBLE(time));
@@ -457,15 +457,29 @@ static int likwid_plugin_init(void)
   return ret;
 }
 
+#ifndef TEST_LIWKID
 /*! brief Resets the likwid group counters
 
 Example notification on command line:
-echo "PUTNOTIF severity=okay time=$(date +%s) message=resetLikwidCounters" |   socat - UNIX-CLIENT:$HOME/sw/collectd/collectd-unixsock
+echo "PUTNOTIF severity=okay time=$(date +%s) plugin=likwid message=rstCtrs" | socat - UNIX-CLIENT:$HOME/sw/collectd/collectd-unixsock
  */
 static int likwid_plugin_notify(const notification_t *type, user_data_t *usr )
 {
-  _resetCounters();
+  if ( 0 == strncmp(type->plugin, "likwid", 6) ) {
+    if ( 0 == strncmp(type->message, "rstCtrs", 7) ) {
+      _resetCounters();
+    } else if ( 0 == strncmp(type->message, "disable", 7) ) {
+      INFO(PLUGIN_NAME ": Disable reading of Likwid metrics");
+      plugin_disabled = true;
+    } else if ( 0 == strncmp(type->message, "enable", 6) ) {
+      INFO(PLUGIN_NAME ": Enable reading of Likwid metrics");
+      plugin_disabled = false;
+    }
+  }
+
+  return 0;
 }
+#endif
 
 static int likwid_plugin_finalize( void )
 {
@@ -677,7 +691,60 @@ int main(int argc, char *argv[]) {
   // initialize LIKWID
   _init_likwid();
 
+  CpuTopology_t cputopo = get_cpuTopology();
+
+  fprintf( stderr, "Number of activeHWThreads: %d, numHWThreads: %d, numCoresPerSocket: %d, numThreadsPerCore: %d\n", cputopo->activeHWThreads, cputopo->numHWThreads, cputopo->numCoresPerSocket, cputopo->numThreadsPerCore);
+
   _setupGroups();
+
+  // read from likwid
+  for(int g = 0; g < numGroups; g++) {
+    int gid = metricGroups[g].id;
+    if(gid < 0) {
+      fprintf(stderr, "No eventset specified for group %s\n", metricGroups[g].name);
+      continue;
+    }
+
+    if(0 != perfmon_setupCounters(gid)) {
+      fprintf(stderr, "Could not setup counters for group %s\n", metricGroups[g].name);
+      continue;
+    }
+
+    // measure counters for setup group
+    perfmon_startCounters();
+    sleep(mTime);
+    perfmon_stopCounters();
+
+    //int nmetrics = perfmon_getNumberOfMetrics(gid);
+    int nmetrics = metricGroups[g].numMetrics;
+    
+    fprintf(stderr, ": Measured %d metrics for %d CPUs for group %s (%d sec)\n", nmetrics, numCPUs, metricGroups[g].name, mTime);
+
+    // for all active hardware threads
+    for(int c = 0; c < numCPUs; c++) {
+      // for all metrics in the group
+      for(int m = 0; m < nmetrics; m++) {
+        double metricValue = perfmon_getLastMetric(gid, m, c);
+        metric_t *metric = &(metricGroups[g].metrics[m]);
+
+        //fprintf(stderr, ": %lu - %s(%d):%lf", CDTIME_T_TO_TIME_T(time), metric->name, cpus[c], metricValue);
+
+        char* metricName = metric->name; 
+  
+        //REMOVE: check that we write the value for the correct metric
+        if ( 0 != strcmp(metricName, perfmon_getMetricName(gid, m))) {
+          fprintf(stderr, ": Something went wrong!!!\n");
+        }
+
+        // skip cores that do not provide values for per socket metrics
+        if (!metric->percpu && !_isSocketInfoCore(c)) {
+          continue;
+        }
+
+        fprintf(stderr, "%s:%s, cpu %d = %f\n", _getMeasurementName(metric), metricName, cpus[c], metricValue);
+      }
+    }
+  }
 
   // finalize LIKWID
   likwid_plugin_finalize();
