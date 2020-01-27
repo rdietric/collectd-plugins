@@ -8,14 +8,39 @@
 #include <likwid.h>
 
 #ifdef TEST_LIWKID
-
-#include <strings.h>
+#include <inttypes.h>
+#include <sys/time.h>
+#include <time.h>
 
 #define STATIC_ARRAY_SIZE(a) (sizeof(a) / sizeof(*(a)))
 
-#define TIME_T_TO_CDTIME_T(t) t
+/********* Collectd time stuff ***********/
+#define TIME_T_TO_CDTIME_T_STATIC(t) (((cdtime_t)(t)) << 30)
+#define TIME_T_TO_CDTIME_T(t)                                                  \
+  (cdtime_t) { TIME_T_TO_CDTIME_T_STATIC(t) }
+#define NS_TO_CDTIME_T(ns)                                                     \
+  (cdtime_t) {                                                                 \
+    ((((cdtime_t)(ns)) / 1000000000) << 30) |                                  \
+        ((((((cdtime_t)(ns)) % 1000000000) << 30) + 500000000) / 1000000000)   \
+  }
+#define TIMESPEC_TO_CDTIME_T(ts)                                               \
+  NS_TO_CDTIME_T(1000000000ULL * (ts)->tv_sec + (ts)->tv_nsec)
 /* Type for time as used by "utils_time.h" */
 typedef uint64_t cdtime_t;
+cdtime_t cdtime(void) /* {{{ */
+{
+  int status;
+  struct timespec ts = {0, 0};
+
+  status = clock_gettime(CLOCK_REALTIME, &ts);
+  if (status != 0) {
+    printf("cdtime: clock_gettime failed\n");
+    return 0;
+  }
+
+  return TIMESPEC_TO_CDTIME_T(&ts);
+} /* }}} cdtime_t cdtime */
+/********* END: Collectd time stuff ***********/
 
 #define ERROR(...) plugin_log(0, __VA_ARGS__)
 #define WARNING(...) plugin_log(0, __VA_ARGS__)
@@ -273,6 +298,8 @@ static int _init_likwid(void)
   return 0;
 }
 
+
+#ifndef TEST_LIWKID
 static void _resetCounters(void)
 {
   INFO(PLUGIN_NAME ": (Re)set counters configuration for %d groups!", numGroups);
@@ -287,6 +314,7 @@ static void _resetCounters(void)
     perfmon_setCountersConfig(metricGroups[g].id);
   }
 }
+#endif
 
 static const char* _getMeasurementName(metric_t *metric)
 {
@@ -312,7 +340,11 @@ static bool _isSocketInfoCore(int cpu_idx)
 
 #ifdef TEST_LIWKID
 
-
+static int _submit_value(const char* measurement, const char* metric, int cpu, double value, cdtime_t time) 
+{
+  fprintf( stderr, "%d: %s - %s = %lf (%"PRIu64")\n", cpu, measurement, metric, value, time);
+  return 0;
+}
 
 #else
 
@@ -342,6 +374,7 @@ static int _submit_value(const char* measurement, const char* metric, int cpu, d
 
   plugin_dispatch_values(&vl);
 }
+#endif
 
 static int likwid_plugin_read(void) {
   if( plugin_disabled ) {
@@ -441,7 +474,6 @@ static int likwid_plugin_read(void) {
 
   return 0;
 }
-#endif
 
 static int likwid_plugin_init(void)
 {
@@ -696,54 +728,9 @@ int main(int argc, char *argv[]) {
   fprintf( stderr, "Number of activeHWThreads: %d, numHWThreads: %d, numCoresPerSocket: %d, numThreadsPerCore: %d\n", cputopo->activeHWThreads, cputopo->numHWThreads, cputopo->numCoresPerSocket, cputopo->numThreadsPerCore);
 
   _setupGroups();
-
-  // read from likwid
-  for(int g = 0; g < numGroups; g++) {
-    int gid = metricGroups[g].id;
-    if(gid < 0) {
-      fprintf(stderr, "No eventset specified for group %s\n", metricGroups[g].name);
-      continue;
-    }
-
-    if(0 != perfmon_setupCounters(gid)) {
-      fprintf(stderr, "Could not setup counters for group %s\n", metricGroups[g].name);
-      continue;
-    }
-
-    // measure counters for setup group
-    perfmon_startCounters();
-    sleep(mTime);
-    perfmon_stopCounters();
-
-    //int nmetrics = perfmon_getNumberOfMetrics(gid);
-    int nmetrics = metricGroups[g].numMetrics;
-    
-    fprintf(stderr, ": Measured %d metrics for %d CPUs for group %s (%d sec)\n", nmetrics, numCPUs, metricGroups[g].name, mTime);
-
-    // for all active hardware threads
-    for(int c = 0; c < numCPUs; c++) {
-      // for all metrics in the group
-      for(int m = 0; m < nmetrics; m++) {
-        double metricValue = perfmon_getLastMetric(gid, m, c);
-        metric_t *metric = &(metricGroups[g].metrics[m]);
-
-        //fprintf(stderr, ": %lu - %s(%d):%lf", CDTIME_T_TO_TIME_T(time), metric->name, cpus[c], metricValue);
-
-        char* metricName = metric->name; 
   
-        //REMOVE: check that we write the value for the correct metric
-        if ( 0 != strcmp(metricName, perfmon_getMetricName(gid, m))) {
-          fprintf(stderr, ": Something went wrong!!!\n");
-        }
-
-        // skip cores that do not provide values for per socket metrics
-        if (!metric->percpu && !_isSocketInfoCore(c)) {
-          continue;
-        }
-
-        fprintf(stderr, "%s:%s, cpu %d = %f\n", _getMeasurementName(metric), metricName, cpus[c], metricValue);
-      }
-    }
+  while(true) {
+    likwid_plugin_read();
   }
 
   // finalize LIKWID
