@@ -14,7 +14,7 @@
 
 #define PLUGIN_NAME "testplugin"
 
-static int test_plugin_read_zwei(void) {
+static int test_plugin_read_complex(user_data_t *ud) {
   INFO(PLUGIN_NAME ": %s:%d", __FUNCTION__, __LINE__);
 }
 
@@ -27,6 +27,18 @@ static int test_plugin_read(void) {
 static int test_plugin_init(void)
 {
   INFO(PLUGIN_NAME ": %s:%d", __FUNCTION__, __LINE__);
+
+  char *interval_str = getenv("MY_INTERVAL");
+
+  double interval = strtod(interval_str, NULL);
+  if(interval == 0.0){
+    WARNING("No interval for complex read. Defaulting to 10.0.");
+    interval = 10.0;
+  }
+  else{
+    INFO("set interval for complex read to %.2lf.", interval);
+  }
+  plugin_register_complex_read("testcomplex", "testreadcomplex", test_plugin_read_complex, DOUBLE_TO_CDTIME_T(interval),NULL);
   
   return 0;
 }
@@ -76,7 +88,6 @@ static int test_plugin_config (const char *key, const char *value)
 void module_register(void) {
   plugin_register_config (PLUGIN_NAME, test_plugin_config, config_keys, config_keys_num);
   plugin_register_read(PLUGIN_NAME, test_plugin_read);
-  plugin_register_read("zwei", test_plugin_read_zwei);
   plugin_register_init(PLUGIN_NAME, test_plugin_init);
   plugin_register_shutdown(PLUGIN_NAME, test_plugin_finalize);
   plugin_register_flush(PLUGIN_NAME, test_plugin_flush, /* user data = */ NULL);
