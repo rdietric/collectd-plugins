@@ -195,8 +195,9 @@ def _send():
         'No previous values are stored. Should not happen!')
     return
 
-  # Send data to influxdb
-  collectd.debug('[InfluxDB Writer] Write %d series of data' % (len(metrics)))
+  # Send data to InfluxDB (len(metrics) <= batch_count as NaN and inf are not moved from batch to metrics)
+  #collectd.info('[InfluxDB Writer] Write %d series of data' % (len(metrics)))
+  collectd.info('[InfluxDB Writer] Write %d series of data (%d rates)' % (len(metrics), len(batch_derive)))
 
   ret = False
 
@@ -232,8 +233,12 @@ def _prepare_metrics():
         # if the tag (plugin instance) is not None, add it with measurement (plugin) as key
         tags = {"hostname": valueList.host}
         if tag:
-          if measurement.endswith('cpu') or measurement.endswith('_socket'): 
+          if measurement.endswith('cpu') or measurement.endswith('_socket'):
+            # plugin instance is CPU core
             tags['cpu'] = tag #_getInteger(tag)
+          elif measurement == 'nvml' or measurement.startswith('gpu'):
+            # plugin instance is GPU id
+            tags['gpu'] = tag
           else:
             tags[measurement] = tag
 
