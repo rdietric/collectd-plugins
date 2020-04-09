@@ -19,7 +19,7 @@ A collectd value is identified by plugin, plugin instance, type and type instanc
 import collectd
 import os
 import math
-import threading
+import subprocess
 import re
 
 try:
@@ -42,49 +42,26 @@ cache_size = 2000  # maximum number of metrics to store locally (e.g. if sends f
 batch = {} # all unsent value lists are stored here
 
 store_rates = False
-batch_derive = {} # all previous value lists of derived/counter types are stored here
+batch_derive = {} # storage for previous value lists of derived/counter types
 
-debug = True
+#### Mapping of HW threads to cores ####
+per_core_plugins = None
+per_core_avg_plugins = None
+
+# default: SMT is disabled: no. of HW threads == no. of physical cores 
+threads_per_core = 1
+
+# hardware thread ID is provided by the OS contiguous, starting from zero
+coreMapping = None
+
+# timestamp of the current group of values (see write() and _collect()) with seconds precision
+currentTimestamp = 0
+
+#num_aggregated = 0
+########################################
+
 time_precision = 's'
 
-"""
-Set plugin configuration (from collectd config file).
-"""
-def set_config(config):
-  if config.values[0] == 'influx_write':
-    collectd.info("[InfluxDB Writer] Get configuration")
-    for value in config.children:
-      if value.key == 'ssl':
-        global ssl
-        ssl = bool(value.values[0])
-      elif value.key == 'host':
-        global hostname
-        hostname = value.values[0]
-      elif value.key == 'port':
-        global port
-        port = int(value.values[0])
-      elif value.key == 'user':
-        global username
-        username = value.values[0]
-      elif value.key == 'pwd':
-        global password
-        password = value.values[0]
-      elif value.key == 'database':
-        global database
-        database = value.values[0]
-      elif value.key == 'batch_size': 
-        global batch_size
-        batch_size = _getInteger(value.values[0])
-      elif value.key == 'cache_size':
-        global cache_size
-        cache_size = _getInteger(value.values[0])
-      elif value.key == 'StoreRates':
-        global store_rates
-        store_rates = value.values[0]
-        if store_rates:
-          collectd.info("[InfluxDB Writer] Store rates for derived and counter types")
-      else:
-        collectd.info("[InfluxDB Writer] Ignore unknown option %s" % (value.key,))
 
 """
 Connect to the InfluxDB server
@@ -96,10 +73,10 @@ def _connect():
       influx = InfluxDBClient(host=hostname, port=port, username=username, 
                               password=password, database=database, ssl=ssl)
       
-      collectd.info("[InfluxDB Writer] Established connection to %s:%d/%s." % (hostname, port, database) )
+      collectd.info("InfluxDB write: established connection to %s:%d/%s." % (hostname, port, database) )
   except Exception as ex:
       # Log Error
-      collectd.info("[InfluxDB Writer] Failed to connect to %s:%s/%s. (%s:%s) - %s" % (hostname, port, database, username, password, ex) )
+      collectd.info("InfluxDB write: failed to connect to %s:%s/%s. (%s:%s) - %s" % (hostname, port, database, username, password, ex) )
       _close()
 
 """
@@ -110,60 +87,101 @@ def _close():
     influx = None
 
 """
-Collectd initialization callback.
-Responsible for starting the sending thread
+Mapping of HW threads to CPU cores (via parsing the output of likwid-topology)
 """
-def init_callback():
-  global InfluxDBClient
-  if not InfluxDBClient:
-    collectd.info('[InfluxDB Writer] influxdb.client.InfluxDBClient import failed.')
-  else:
-    #collectd.info('[InfluxDB Writer] Initialize.')
-    _connect()
-  
-def write(valueList, data=None):
-  if not InfluxDBClient:
-    return
+def _setHWThreadMapping():
+  cmd = 'likwid-topology -O' # comma separated topology output
 
-  #collectd.info('[InfluxDB Writer] %s' % (str(valueList),))
-  #if data:
-  #  collectd.info('[InfluxDB Writer] Data: %s' % (str(data),))
+  try:
+    status, result = subprocess.getstatusoutput(cmd)
+  except Exception as ex:
+    collectd.info("InfluxDB write: error launching '%s': %s" % (cmd, repr(ex)))
+    return False
 
+  # a zero status means without errors, 13 means permission denied (maybe only for some mounts)
+  if status != 0 and status != 13:
+    collectd.info("InfluxDB write: get HW thread mapping failed (status: %s): %s" % (status, result))
+    return False
+
+  startIdx = 0
+  num_threads = 0
+  lines = result.split('\n')
+
+  # determine start and end of thread mapping lines
+  for line in lines:
+    if line.startswith("Threads per core:"):
+      global threads_per_core
+      threads_per_core = int(re.search(r'\d+', line).group())
+      if threads_per_core == 1:
+        return False
+
+    startIdx += 1
+    if line.startswith('TABLE,Topology,'):
+      num_threads = int(re.search(r'\d+', line).group())
+      startIdx += 1 # skip table header
+      break
+
+  # initialize and fill mapping array
+  global coreMapping
+  coreMapping = [None]*num_threads
+  for line in lines[startIdx:startIdx+num_threads]:
+    v = line.split(',')
+    try:
+      coreMapping[int(v[0])] = v[2]
+      #coreMapping[v[0]] = v[2]
+      collectd.info("InfluxDB write: HW thread {:3d} -> Core {:3d}".format(int(v[0]), int(v[2])))
+    except:
+      collectd.info("InfluxDB write: HWThread-to-core mapping out of bound error")
+      return False
+
+  return True
+
+
+"""
+brief: Store values per plugin instance. 
+
+Value lists are stored per plugin and plugin instance. The plugin instance is 
+used as a tag. For per-core plugins (see configuration), the plugin instance is 
+assumed to be the processor ID (given by the OS). 
+
+Return True, if a value has been added to the batch, otherwise False.
+"""
+def _collect(valueList):
   global batch
-  global batch_count
-  if batch_count <= cache_size:
-    # Add the data to the batch
-    #_store_per_plugin(valueList)
-    _store_per_plugin_instance(valueList)
-    batch_count += 1
 
-  # If there are sufficient metrics, then pickle and send
-  if batch_count >= batch_size:
-    collectd.debug("[InfluxDB Writer] Sending batch size: %d/%d" % (batch_count, batch_size))
-    _send()
-
-"""
-Store values per per plugin instance. 
-Plugin name and plugin instance (tag) identify a value list. 
-"""
-def _store_per_plugin_instance(valueList):
-  global batch
-
-  if valueList.plugin:
+  if valueList.plugin: 
     plugin_name = valueList.plugin
-  elif valueList.type:
-    plugin_name = valueList.type
   else:
-    collectd.error('[InfluxDB Writer] Either a plugin or type is required!')
-    return
+    collectd.error('InfluxDB writer: plugin member is required!')
+    return False
 
   tag = valueList.plugin_instance
 
-  #collectd.info("Write valueList: %s" % (valueList,))
+  # first check for the tag, which is None for many plugins
+  is_per_core = tag and threads_per_core > 1 and valueList.plugin in per_core_plugins
+
+  # map to core
+  if is_per_core:
+    #collectd.info("value: " + str(valueList))
+    tag = coreMapping[int(tag)]
+    valueList.plugin_instance = tag
 
   # create array for plugin and tag, if it is not available yet
   if plugin_name in batch:
     if tag in batch[plugin_name]:
+      # aggregate (sum up) per core, if configured
+      if is_per_core:
+        # iterate reversed as matches are most probable at the end of the list
+        # lists should be very short 
+        valueListTimeInt = int(valueList.time)
+        for vlStored in reversed(batch[plugin_name][tag]):
+          if vlStored.type == valueList.type and vlStored.type_instance == valueList.type_instance and int(vlStored.time) == valueListTimeInt:
+            for idx in range(len(vlStored.values)):
+              vlStored.values[idx] += valueList.values[idx]
+              #global num_aggregated
+              #num_aggregated += 1
+            return False
+
       # append value
       batch[plugin_name][tag].append(valueList)
     else:
@@ -173,15 +191,19 @@ def _store_per_plugin_instance(valueList):
     # add the plugin and the tag with a new value
     batch[plugin_name] = {tag:[valueList]}
 
+  return True
+
+
 """
 Send data to InfluxDB. Data that cannot be sent will be kept in cache.
 """
 def _send():
   global batch
   global batch_count
+  #global num_aggregated
 
   if not influx:
-    collectd.info('[InfluxDB Writer] Connection not available. Try reconnect ...')
+    collectd.info('InfluxDB write: connection not available. Try reconnect ...')
     _connect()
 
   metrics = _prepare_metrics()
@@ -191,13 +213,14 @@ def _send():
     batch = {}
     batch_count = 0
     if len(batch_derive) == 0:
-      collectd.info('[InfluxDB Writer] No metrics to send. '
+      collectd.info('InfluxDB write: no metrics to send. '
         'No previous values are stored. Should not happen!')
     return
 
   # Send data to InfluxDB (len(metrics) <= batch_count as NaN and inf are not moved from batch to metrics)
-  #collectd.info('[InfluxDB Writer] Write %d series of data' % (len(metrics)))
-  collectd.info('[InfluxDB Writer] Write %d series of data (%d rates)' % (len(metrics), len(batch_derive)))
+  collectd.info('InfluxDB write: write %d lines (%d series)' % (len(metrics), batch_count))
+  #collectd.info('InfluxDB write: %d lines (%d series incl. %d rates), %d aggregated' % (len(metrics), batch_count, len(batch_derive), num_aggregated) )
+  #collectd.info(str(metrics))
 
   ret = False
 
@@ -205,7 +228,7 @@ def _send():
     try:
       ret = influx.write_points(metrics, time_precision=time_precision)
     except Exception as ex:
-      collectd.error("[InfluxDB Writer] Error sending metrics(%s)" % (ex))
+      collectd.error("InfluxDB write: error sending metrics(%s)" % (ex,))
       #raise
 
   # empty batch buffer for successful writes
@@ -213,6 +236,7 @@ def _send():
     #collectd.info("reset batch")
     batch = {}
     batch_count = 0
+    #num_aggregated = 0
 
 def _prepare_metrics():
   global batch
@@ -234,7 +258,7 @@ def _prepare_metrics():
         tags = {"hostname": valueList.host}
         if tag:
           if measurement.endswith('cpu') or measurement.endswith('_socket'):
-            # plugin instance is CPU core
+            # plugin instance is processor ID (given by OS)
             tags['cpu'] = tag #_getInteger(tag)
           elif measurement == 'nvml' or measurement.startswith('gpu'):
             # plugin instance is GPU id
@@ -250,12 +274,13 @@ def _prepare_metrics():
         field_name = metricName
         
         if len(valueList.values) == 0:
-          collectd.info("No values available for %s:%s!" % (measurement,metricName))
+          collectd.info("InfluxDB write: no values available for %s:%s!" % (measurement,metricName))
           continue
 
         for midx, value in enumerate(valueList.values):
           # ignore invalid values
           if str(value) == "nan" or math.isnan(float(value)) or str(value) == "inf":
+            #collectd.info("Found invalid value!")
             continue
 
           # get dataset to determine types
@@ -269,7 +294,13 @@ def _prepare_metrics():
             except:
               field_name = metricName + str(midx)
 
-          # for derived counters
+          # build average per core for respectively configured metrics
+          # (assumes that no HW thread value got lost within a time group)
+          if threads_per_core > 1 and measurement in per_core_avg_plugins:
+            #collectd.info("divide by thread/core: %s:%s = %f/%d=%f!" % (measurement,metricName,value, threads_per_core, value/threads_per_core) )
+            value /= threads_per_core
+
+          #### for derived counters ####
           if store_rates and (ds[midx][1] == 'derive' or ds[midx][1] == 'counter'):
             #collectd.info("Derived: %s (%s)" % (valueList,ds))
 
@@ -296,7 +327,7 @@ def _prepare_metrics():
                 # can occur, if we have the same plugin and plugin instance,
                 # but different types (e.g. with the disk plugin)
                 if prevValueList.type == valueList.type:
-                  collectd.warning("[InfluxDB Writer] Found a previous value "
+                  collectd.warning("InfluxDB write: found a previous value "
                     "for this metric with the same timestamp (prev: %s, curr: %s)"
                     % (batch_derive[counterMetricID], valueList) )
                 continue
@@ -342,25 +373,136 @@ def _prepare_metrics():
 
   return metrics
 
-pattern = re.compile(r'\d')
+"""
+Extract integer value from string
+"""
+intPattern = re.compile(r'\d')
 def _getInteger(stringInt):
   ret = None
   try:
     ret = int(stringInt)
-  except ValueError as e:
-    ret = pattern.match(stringInt)
+  except: # ValueError as e:
+    ret = intPattern.match(stringInt)
     if ret:
       return int(ret.group())
     
   return ret
+
+############################################
+##### Start Collectd callback routines #####
+"""
+Set plugin configuration (from collectd config file).
+"""
+def set_config(config):
+  if config.values[0] == 'influx_write':
+    collectd.info("InfluxDB write: get configuration")
+    for value in config.children:
+      if value.key == 'ssl':
+        global ssl
+        ssl = bool(value.values[0])
+      elif value.key == 'host':
+        global hostname
+        hostname = value.values[0]
+      elif value.key == 'port':
+        global port
+        port = int(value.values[0])
+      elif value.key == 'user':
+        global username
+        username = value.values[0]
+      elif value.key == 'pwd':
+        global password
+        password = value.values[0]
+      elif value.key == 'database':
+        global database
+        database = value.values[0]
+      elif value.key == 'batch_size': 
+        global batch_size
+        batch_size = _getInteger(value.values[0])
+      elif value.key == 'cache_size':
+        global cache_size
+        cache_size = _getInteger(value.values[0])
+      elif value.key == 'StoreRates':
+        global store_rates
+        store_rates = value.values[0]
+        if store_rates:
+          collectd.info("InfluxDB write: store rates for derived and counter types")
+      elif value.key == 'PerCore':
+        global per_core_plugins
+        global per_core_avg_plugins
+        per_core_plugins = []
+        per_core_avg_plugins = []
+        for value in value.values:
+          #collectd.info(value)
+          v = value.split(':')
+          per_core_plugins.append(v[0])
+          if v[1] == 'avg':
+            per_core_avg_plugins.append(v[0])
+      else:
+        collectd.info("InfluxDB write: ignore unknown option %s" % (value.key,))
+
+"""
+Collectd initialization callback.
+Responsible for starting the sending thread
+"""
+def init_callback():
+  global InfluxDBClient
+  if not InfluxDBClient:
+    collectd.info('InfluxDB write: influxdb.client.InfluxDBClient import failed.')
+  else:
+    #collectd.info('[InfluxDB Writer] Initialize.')
+    global per_core_plugins
+    if per_core_plugins:
+      if not _setHWThreadMapping():
+        per_core_plugins = None
+        
+    _connect()
+
+
+"""
+Collectd write callback.
+Retrieves values from read plugins.
+"""
+def write(valueList, data=None):
+  if not InfluxDBClient:
+    return
+
+  #collectd.info('InfluxDB write: %s' % (str(valueList),))
+  #if data:
+  #  collectd.info('[InfluxDB Writer] Data: %s' % (str(data),))
+
+  # cut fraction of seconds (required to group values from e.g. cpu plugin, 
+  # where values from different HW threads have differ in the fractional part
+  # of the timestamp)
+  vlTime = int(valueList.time)
+  global currentTimestamp
+  if currentTimestamp == 0:
+    currentTimestamp = vlTime
+    #collectd.info("InfluxDB write: group time {:d}".format(currentTimestamp))
+
+  # check for changed timestamp before sending to make sure that all values in
+  # current time period (second) are aggregated
+  global batch_count
+  if currentTimestamp != vlTime:
+    currentTimestamp = vlTime
+    #collectd.info("InfluxDB write: group time {:d}".format(currentTimestamp))
+    if batch_count >= batch_size: 
+      #collectd.info("InfluxDB write: sending batch of {:d}".format(batch_count))
+      _send()
+
+  # Add data to global batch
+  if batch_count <= cache_size:
+    if _collect(valueList):
+      batch_count += 1
+      #collectd.info("batch count: " + str(batch_count))
   
 def flush(timeout, identifier):
   global batch_count
-  collectd.info("[InfluxDB Writer] Flush metrics in batch with size %d." % (batch_count))
+  collectd.info("InfluxDB write: flush {:d} values".format(batch_count))
 
   # Send pickled batch
   _send()
     
+# register Collectd callbacks
 collectd.register_config(set_config)
 collectd.register_write(write)
 collectd.register_init(init_callback)
