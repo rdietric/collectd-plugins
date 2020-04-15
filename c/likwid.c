@@ -1,9 +1,11 @@
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <float.h>
 
 #include <likwid.h>
 
@@ -25,6 +27,10 @@
   }
 #define TIMESPEC_TO_CDTIME_T(ts)                                               \
   NS_TO_CDTIME_T(1000000000ULL * (ts)->tv_sec + (ts)->tv_nsec)
+
+#define CDTIME_T_TO_TIME_T(t)                                                  \
+  (time_t) { (time_t)(((t) + (1 << 29)) >> 30) }
+
 /* Type for time as used by "utils_time.h" */
 typedef uint64_t cdtime_t;
 cdtime_t cdtime(void) /* {{{ */
@@ -40,8 +46,12 @@ cdtime_t cdtime(void) /* {{{ */
 
   return TIMESPEC_TO_CDTIME_T(&ts);
 } /* }}} cdtime_t cdtime */
-  /********* END: Collectd time stuff ***********/
-
+/********* END: Collectd time stuff ***********/
+#ifdef DEBUG
+#define DEBUG(...) plugin_log(0, __VA_ARGS__)
+#else
+#define DEBUG(...)
+#endif
 #define ERROR(...) plugin_log(0, __VA_ARGS__)
 #define WARNING(...) plugin_log(0, __VA_ARGS__)
 #define NOTICE(...) plugin_log(0, __VA_ARGS__)
@@ -70,47 +80,55 @@ typedef void *user_data_t;
 
 #define PLUGIN_NAME "likwid"
 
-static int accessMode = 0;   // direct access
-static int mTime = 10;       /**< Measurement time per group in seconds */
-static cdtime_t mcdTime = 0; // TIME_T_TO_CDTIME_T(15);
-static int startSecond = 20;
+static bool plugin_disabled = false;
 
+/*! counter register access mode (default: direct access / perf_event) */
+static int accessMode = 0;
+
+/*! measurement time per group in seconds (default: 10sec) */
+static int mTime = 10;
+
+/*! measurement time per group in cdtime_t */
+static cdtime_t mcdTime = 0;
+
+/*! Likwid verbosity output level (default: 1) */
 static int likwid_verbose = 1;
 
-static bool summarizeFlops = false;
+/*! Normalize FLOPS to single precision? (default: false) */
 static bool normalizeFlops = false;
+
+/*! Summarize multiple FLOPS metrics into single precision FLOPS (can be true
+ * only if multiple FLOPS metrics are monitored) */
+static bool summarizeFlops = false;
+
+/*! Name of the normalized FLOPS metric */
 static char *normalizedFlopsName = "flops_any";
-static double *flopsValues =
-    NULL; /**< storage to normalize FLOPS values flopsValues[cpu] */
+
+/*! storage to normalize FLOPS values */
+static double *flopsValues = NULL;
 
 /*! \brief Maximum values for metrics */
 typedef struct {
-  char *metricName; /*!< metric name */
+  char *metricName;
   double maxValue;
 } max_value_t;
 static max_value_t *maxValues = NULL;
 static int numMaxValues = 0;
-
-static int numCPUs = 0;
-static int *cpus = NULL;
-
-static int numSockets = 0;
-static int *socketInfoCores = NULL;
-
-static bool plugin_disabled = false;
+static uint64_t counterLimit = 0;
 
 /*! \brief Metric type */
-typedef struct metric_st {
+typedef struct {
   char *name;     /*!< metric name */
   uint8_t xFlops; /*!< if > 0, it is a FLOPS metric and the value is
                        the multiplier for normalization */
-  bool percpu; /*!< true, if values are per CPU, otherwise per socket is assumed
+  bool perCpu; /*!< true, if values are per CPU, otherwise per socket is assumed
                 */
+  double *perCoreValues; /*! Sum up HW thread values to core granularity */
   double maxValue;
 } metric_t;
 
 /*! \brief Metric group type */
-typedef struct metric_group_st {
+typedef struct {
   int id;            /*!< group ID */
   char *name;        /*!< group name */
   int numMetrics;    /*!< number of metrics in this group */
@@ -120,10 +138,26 @@ typedef struct metric_group_st {
 static int numGroups = 0;
 static metric_group_t *metricGroups = NULL;
 
-/**< array of per socket metric names */
-static int numSocketMetrics = 0;
-static char **perSocketMetrics = NULL;
+/* required thread array */
+static int numThreads = 0;    /**< number of HW threads to be monitored */
+static int *hwThreads = NULL; /**< array of apic IDs to be monitored */
 
+/*! per-socket metrics */
+static int numSockets = 0;
+static int *socketThreadIndices =
+    NULL; /*!< threads containing the per-socket data */
+static int numSocketMetrics = 0;
+static char **perSocketMetrics = NULL; /*!< array of per socket metric names */
+
+/*!< Optional: sum up hardware thread values to cores, if SMT is enabled. */
+static bool summarizePerCore = false;
+static uint32_t numCores = 0;
+
+/*! \brief Thread to core mapping structures */
+static int *coreIndices = NULL;  /*!< Index into the per core data array */
+static uint32_t *coreIds = NULL; /*!< ID of the physical core by core index */
+
+/*! Define an own strdup() as in C99 no strdup prototype is available. */
 static char *mystrdup(const char *s) {
   size_t len = strlen(s) + 1;
   char *result = (char *)malloc(len);
@@ -132,7 +166,7 @@ static char *mystrdup(const char *s) {
   return (char *)memcpy(result, s, len);
 }
 
-/*! brief Determines by metric name, whether this is a per CPU or per socket
+/*! Determines by metric name, whether this is a per CPU or per socket
 metric. The default is "per CPU" */
 static bool _isMetricPerCPU(const char *metric) {
   for (int i = 0; i < numSocketMetrics; i++) {
@@ -144,7 +178,8 @@ static bool _isMetricPerCPU(const char *metric) {
   return true;
 }
 
-void _setupGroups() {
+/*! \brief Initializes the event sets to be monitored. */
+static void _setupGroups() {
   if (NULL == metricGroups) {
     ERROR(PLUGIN_NAME "No metric groups allocated! Plugin not initialized?");
     return;
@@ -196,7 +231,7 @@ void _setupGroups() {
           metrics[m].name = perfmon_getMetricName(gid, m);
 
           // determine if metric is per CPU or per socket (by name)
-          metrics[m].percpu = _isMetricPerCPU(metrics[m].name);
+          metrics[m].perCpu = _isMetricPerCPU(metrics[m].name);
 
           // normalize flops, if enabled
           if (normalizeFlops && 0 == strncmp("flops", metrics[m].name, 5)) {
@@ -217,13 +252,36 @@ void _setupGroups() {
             metrics[m].xFlops = 0;
           }
 
-          // set maximum value of metric, if available
-          metrics[m].maxValue = 0.0;
-          /*for (int i = 0; i < numMaxValues; i++) {
-            if (0 == strncmp(metrics[m].name, maxValues[i].metricName, strlen(maxValues[i].metricName))) {
+          // if HW thread values should be summarized to cores, allocate per
+          // metric arrays
+          if (summarizePerCore) {
+            metrics[m].perCoreValues =
+                (double *)malloc(numCores * sizeof(double));
+            if (NULL == metrics[m].perCoreValues) {
+              WARNING(PLUGIN_NAME
+                      ": Malloc failed. Cannot summarize per core!");
+              summarizePerCore = false;
+            }
+
+            // initialize to invalid values, which will not be submitted
+            for (int i = 0; i < numCores; i++) {
+              metrics[m].perCoreValues[i] = -1.0;
+            }
+          }
+
+          // set maximum value of metric
+          if(counterLimit != 0) {
+            metrics[m].maxValue = (double)counterLimit;
+          } else {
+            metrics[m].maxValue = DBL_MAX;
+          }
+          
+          for (int i = 0; i < numMaxValues; i++) {
+            if (0 == strncmp(metrics[m].name, maxValues[i].metricName,
+                             strlen(maxValues[i].metricName))) {
               metrics[m].maxValue = maxValues[i].maxValue;
             }
-          }*/
+          }
         } // END for metrics
       }
     } else {
@@ -238,10 +296,12 @@ void _setupGroups() {
     INFO(PLUGIN_NAME ": Different FLOPS are aggregated and normalized.");
     summarizeFlops = true;
 
-    flopsValues = (double *)malloc(numCPUs * sizeof(double));
+    flopsValues = (double *)malloc(numThreads * sizeof(double));
     if (flopsValues) {
       // initialize with -1 (invalid value)
-      memset(flopsValues, -1.0, numCPUs * sizeof(double));
+      for(int i = 0; i < numThreads; i++){
+        flopsValues[i] = -1.0;
+      }
     } else {
       WARNING(PLUGIN_NAME ": Could not allocate memory for normalization of "
                           "FLOPS. Disable summarization of FLOPS.");
@@ -253,58 +313,151 @@ void _setupGroups() {
   // be handled directly in the Likwid metric group files
 }
 
-static int _init_likwid(void) {
-  perfmon_setVerbosity(likwid_verbose);
+static int likwid_plugin_finalize(void) {
+  INFO(PLUGIN_NAME ": %s:%d", __FUNCTION__, __LINE__);
 
+  // perfmon_finalize(); // segfault
+  affinity_finalize();
+  numa_finalize();
+  topology_finalize();
+
+  // free memory where CPU IDs are stored
+  // INFO(PLUGIN_NAME ": free allocated memory");
+  if (NULL != hwThreads) {
+    free(hwThreads);
+  }
+
+  if (NULL != metricGroups) {
+    for (int i = 0; i < numGroups; i++) {
+      // memory for group names have been allocated with strdup
+      if (NULL != metricGroups[i].name) {
+        free(metricGroups[i].name);
+      }
+    }
+    free(metricGroups);
+
+    if (flopsValues) {
+      free(flopsValues);
+    }
+  }
+
+  return 0;
+}
+
+/*! \brief Initialize the LIKWID monitoring environment */
+static int _init_likwid(void) {
   topology_init();
   numa_init();
   affinity_init();
-  // timer_init();
-  HPMmode(accessMode);
 
-  double timer = 0.0;
-  CpuInfo_t cpuinfo = get_cpuInfo();
   CpuTopology_t cputopo = get_cpuTopology();
-  numCPUs = cputopo->numHWThreads;
-  cpus = malloc(numCPUs * sizeof(int));
-  if (!cpus) {
-    affinity_finalize();
-    numa_finalize();
-    topology_finalize();
+  HWThread *threadPool = cputopo->threadPool;
+  numThreads = cputopo->numHWThreads;
+
+  hwThreads = (int *)malloc(numThreads * sizeof(int));
+  if (NULL == hwThreads) {
+    ERROR(PLUGIN_NAME ": malloc of APIC ID array failed!");
+    likwid_plugin_finalize();
     return 1;
   }
 
-  for (int i = 0; i < cputopo->numHWThreads; i++) {
-    cpus[i] = cputopo->threadPool[i].apicId;
+  for (int i = 0; i < numThreads; i++) {
+    hwThreads[i] = (int)threadPool[i].apicId;
   }
+  HPMmode(accessMode);
+  perfmon_setVerbosity(likwid_verbose);
+  perfmon_init(numThreads, hwThreads);
 
-  // get socket information
+  // determine the HW threads that provide the per-socket data
   numSockets = cputopo->numSockets;
-  socketInfoCores = malloc(numSockets * sizeof(int));
-  if (NULL == socketInfoCores) {
-    ERROR(PLUGIN_NAME
-          ": Memory for socket information could not be allocated!");
+  socketThreadIndices = malloc(numSockets * sizeof(int));
+  if (NULL == socketThreadIndices) {
+    ERROR(PLUGIN_NAME ": malloc of socket thread index array failed!");
     return 1;
   }
-  for (int s = 0; s < numSockets; s++) {
-    socketInfoCores[s] =
-        s * cputopo->numCoresPerSocket * cputopo->numThreadsPerCore;
-    INFO(PLUGIN_NAME ": Collecting per socket metrics for core: %d",
-         socketInfoCores[s]);
+
+  int currentSocketIdx = 0;
+  for (int i = 0; i < numThreads; i++) {
+    uint32_t socketId = threadPool[i].packageId;
+    bool found = false;
+    for (int s = 0; s < currentSocketIdx; s++) {
+      if (socketThreadIndices[s] == socketId) {
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) {
+      socketThreadIndices[currentSocketIdx] = i;
+      INFO(PLUGIN_NAME ": Collecting per-socket metrics with thread %d", i);
+
+      currentSocketIdx++;
+      if (currentSocketIdx == numSockets) {
+        break;
+      }
+    }
   }
 
-  NumaTopology_t numa = get_numaTopology();
-  AffinityDomains_t affi = get_affinityDomains();
-  // timer = timer_getCpuClock();
-  perfmon_init(numCPUs, cpus);
+  // handle per-core summarization
+  uint32_t numThreadsPerCore = cputopo->numThreadsPerCore;
+  if (summarizePerCore == false || numThreadsPerCore == 1) {
+    summarizePerCore = false;
+  } else {
+    INFO(PLUGIN_NAME ": collect per core (%u threads per core)", numThreadsPerCore);
+
+    numCores = cputopo->numCoresPerSocket * numSockets;
+    coreIndices = (int *)malloc(numThreads * sizeof(int));
+    coreIds = (uint32_t *)malloc(numCores * sizeof(uint32_t));
+    if (NULL == coreIndices || coreIds == NULL) {
+      ERROR(PLUGIN_NAME ": memory allocation for CPU core data failed!");
+      likwid_plugin_finalize();
+      return 1;
+    }
+
+    // initialize core value array to invalid indices
+    for (int i = 0; i < numThreads; i++) {
+      coreIndices[i] = -1;
+    }
+
+    // preparation to get per-core values
+    int currentCoreIdx = 0;
+    for (int i = 0; i < numThreads; i++) {
+      if (coreIndices[i] == -1) { // if core index has not been set
+        coreIndices[i] = currentCoreIdx;
+
+        // iterate over following thread indices
+        for (int j = i + 1; j < numThreads; j++) {
+          if (threadPool[i].coreId == threadPool[j].coreId) {
+            coreIndices[j] = currentCoreIdx;
+            coreIds[currentCoreIdx] = threadPool[i].coreId;
+          }
+        }
+
+        currentCoreIdx++;
+      }
+      DEBUG(PLUGIN_NAME ": HWthread:CoreID:CoreArrayIdx %d:%" PRIu32 ":%d",
+           hwThreads[i], threadPool[i].coreId, coreIndices[i]);
+    }
+  }
+
+  CpuInfo_t cpuinfo = get_cpuInfo();
+  uint32_t counterBitWidth = cpuinfo->perf_width_ctr;
+  if(counterBitWidth > 0){
+    counterLimit = ((uint64_t)1 << (counterBitWidth + 1)) - 1;
+    INFO(PLUGIN_NAME ": metric max value (%"PRIu32" bits): %"PRIu64, counterBitWidth, counterLimit);
+  } 
 
   return 0;
 }
 
 #ifndef TEST_LIWKID
-static void _resetCounters(void) {
-  INFO(PLUGIN_NAME ": (Re)set counters configuration for %d groups!",
-       numGroups);
+/*! \brief Sets the counters that have been setup with _setupGroups().
+
+This is only reasonable, if direct access mode is used and other tools can
+change the configuration of the MSR registers.
+*/
+static void _setCounters(void) {
+  INFO(PLUGIN_NAME ": Set counters configuration for %d groups!", numGroups);
 
   for (int g = 0; g < numGroups; g++) {
     if (metricGroups[g].id < 0) {
@@ -317,17 +470,18 @@ static void _resetCounters(void) {
 #endif
 
 static const char *_getMeasurementName(metric_t *metric) {
-  if (metric->percpu) {
+  if (metric->perCpu) {
     return "likwid_cpu";
   } else {
     return "likwid_socket";
   }
 }
 
-/*! brief: cpu_idx is the index in the CPU array */
-static bool _isSocketInfoCore(int cpu_idx) {
+/*! brief: Determine whether the given index in the thread pool contains the
+per socket data */
+static bool _hasSocketData(int thread_array_idx) {
   for (int s = 0; s < numSockets; s++) {
-    if (cpu_idx == socketInfoCores[s]) {
+    if (thread_array_idx == socketThreadIndices[s]) {
       return true;
     }
   }
@@ -336,23 +490,41 @@ static bool _isSocketInfoCore(int cpu_idx) {
 
 #ifdef TEST_LIWKID
 
-static int _submit_value(const char *measurement, const char *metric, int cpu,
+static void _submit_value(const char *measurement, const char *metric, int cpu,
                          double value, cdtime_t time) {
+  // drop invalid values
+  if (value == -1.0) {
+    return;
+  }
+
   fprintf(stderr, "%d: %s - %s = %lf (%" PRIu64 ")\n", cpu, measurement, metric,
           value, time);
-  return 0;
 }
 
 #else
 
-// host "/" plugin ["-" plugin instance] "/" type ["-" type instance]
-// e.g. taurusi2001/likwid_socket-0/cpi
-// plugin field stores the measurement name (likwid_cpu or likwid_socket)
-// the plugin instance stores the CPU ID
-// the type field stores the metric name
-// the type instance stores ???
-static int _submit_value(const char *measurement, const char *metric, int cpu,
-                         double value, cdtime_t time) {
+/*! \brief Submit a metric value.
+
+Collectd metrics are serialized as follows:
+host "/" plugin ["-" plugin instance] "/" type ["-" type instance]
+e.g. taurusi2001/likwid_socket-0/ipc
+
+The type field is statically set to 'likwid'.
+
+@param [in] measurement the measurement name, which maps to the plugin name
+(can be either 'likwid_cpu' or 'likwid_socket')
+@param [in] metric name of the metric to be submitted as type instance
+@param [in] cpu the CPU core, which is mapped to plugin instance
+@param [in] value metric value to be submitted as Collectd gauge type
+@param [in] time timestamp when the metric was acquired
+*/
+static void _submit_value(const char *measurement, const char *metric, int cpu,
+                          double value, cdtime_t time) {
+  // drop invalid values
+  if (value == -1.0) {
+    return;
+  }
+
   value_list_t vl = VALUE_LIST_INIT;
   value_t v = {.gauge = value};
 
@@ -382,9 +554,6 @@ static int likwid_plugin_read(void) {
 
   cdtime_t time = cdtime() + mcdTime * numGroups;
 
-  // INFO(PLUGIN_NAME ": %s:%d (timestamp: %.3f)", __FUNCTION__, __LINE__,
-  // CDTIME_T_TO_DOUBLE(time));
-
   // read from likwid
   for (int g = 0; g < numGroups; g++) {
     int gid = metricGroups[g].id;
@@ -410,17 +579,31 @@ static int likwid_plugin_read(void) {
     int nmetrics = metricGroups[g].numMetrics;
 
     // INFO(PLUGIN_NAME ": Measured %d metrics for %d CPUs for group %s (%d
-    // sec)", nmetrics, numCPUs, metricGroups[g].name, mTime);
+    // sec)", nmetrics, numThreads, metricGroups[g].name, mTime);
 
-    // for all active hardware threads
-    for (int c = 0; c < numCPUs; c++) {
+    // if we change thread and metric loop order, one physical core array is
+    // enough (no array per metric necessary)
+
+    // for all hardware threads
+    for (int c = 0; c < numThreads; c++) {
       // for all metrics in the group
       for (int m = 0; m < nmetrics; m++) {
+        // c is the index in the array used as argument to perfmon_init()
         double metricValue = perfmon_getLastMetric(gid, m, c);
         metric_t *metric = &(metricGroups[g].metrics[m]);
 
-        // INFO(PLUGIN_NAME ": %lu - %s(%d):%lf", CDTIME_T_TO_TIME_T(time),
-        // metric->name, cpus[c], metricValue);
+        //INFO(PLUGIN_NAME ": %lu - %s(%d):%lf", CDTIME_T_TO_TIME_T(time),
+        //metric->name, hwThreads[c], metricValue);
+
+        // skip cores that do not provide values for per socket metrics
+        if (!metric->perCpu && !_hasSocketData(c)) {
+          //INFO("Skip HW thread %d for socket metric %s", c, metric->name);
+          continue;
+        }
+
+        if (isfinite(metricValue) == 0) {
+          continue;
+        }
 
         char *metricName = metric->name;
 
@@ -431,20 +614,15 @@ static int likwid_plugin_read(void) {
         }
 #endif
 
-        // skip cores that do not provide values for per socket metrics
-        if (!metric->percpu && !_isSocketInfoCore(c)) {
+        if (metricValue > metric->maxValue) {
+          INFO(PLUGIN_NAME ": Skipping outlier for %s (%d): %.1lf", metricName, c,
+               metricValue);
           continue;
         }
 
-        /*if (metric->maxValue != 0.0 && metricValue > metric->maxValue) {
-          INFO(PLUGIN_NAME ": Skipping outlier for %s: %.3lf", metricName,
-               metricValue);
-          continue;
-        }*/
-
         // special handling for FLOPS metrics
         if (metric->xFlops > 0) {
-          // if user requested FLOPS normalization
+          // if user requested FLOPS normalization (to single precision)
           if (normalizeFlops) {
             // normalize FLOPS that are not already single precision (if
             // requested)
@@ -455,16 +633,20 @@ static int likwid_plugin_read(void) {
             metricName = normalizedFlopsName;
           }
 
-          // if there are at least two FLOPS metrics, aggregate their normalized
-          // values
+          // if multiple FLOPS metrics, aggregate their normalized values
           if (summarizeFlops) {
             // INFO(PLUGIN_NAME ": FLOPS value set/add: %lu - %s(%d):%lf",
             // CDTIME_T_TO_TIME_T(time), metric->name, cpus[c], metricValue);
 
-            if (-1.0 == flopsValues[c]) {
-              flopsValues[c] = metricValue;
+            int idx = c;
+            if (summarizePerCore) {
+              idx = coreIndices[c];
+            }
+
+            if (-1.0 == flopsValues[idx]) {
+              flopsValues[idx] = metricValue;
             } else {
-              flopsValues[c] += metricValue;
+              flopsValues[idx] += metricValue;
             }
 
             // do not submit yet
@@ -472,20 +654,63 @@ static int likwid_plugin_read(void) {
           }
         }
 
-        _submit_value(_getMeasurementName(metric), metricName, cpus[c],
-                      metricValue, time);
+        if (summarizePerCore) {
+          int idx = coreIndices[c];
+          if (metric->perCoreValues[idx] == -1.0) {
+            metric->perCoreValues[idx] = metricValue;
+          } else {
+            metric->perCoreValues[idx] += metricValue;
+          }
+        } else {
+          _submit_value(_getMeasurementName(metric), metricName, hwThreads[c],
+                        metricValue, time);
+        }
       }
     }
   }
 
-  // submit metrics, if they have been summarized
+  if (summarizePerCore) {
+    for (int g = 0; g < numGroups; g++) {
+      for (int c = 0; c < numCores; c++) {
+        for (int m = 0; m < metricGroups[g].numMetrics; m++) {
+          metric_t *metric = &(metricGroups[g].metrics[m]);
+          const char* metricName = metric->name;
+
+          if (metric->xFlops > 0) {
+            // ignore FLOP values, if summarization of FLOPS is enabled
+            if (summarizeFlops) {
+              continue;
+            }
+
+            if (normalizeFlops) {
+              metricName = normalizedFlopsName;
+            }
+          }
+          
+          _submit_value(_getMeasurementName(metric), metricName, coreIds[c],
+                        metric->perCoreValues[c], time);
+
+          metric->perCoreValues[c] = -1.0;
+        }
+      }
+    }
+  }
+
+  // submit the summarized FLOPS
   if (summarizeFlops) {
-    for (int c = 0; c < numCPUs; c++) {
-      _submit_value("likwid_cpu", normalizedFlopsName, cpus[c], flopsValues[c],
-                    time);
+    int arrayLen = numThreads;
+    int *cpuIds = hwThreads;
+    if (summarizePerCore) {
+      arrayLen = numCores;
+      cpuIds = (int *)coreIds;
+    }
+
+    for (int i = 0; i < arrayLen; i++) {
+      _submit_value("likwid_cpu", normalizedFlopsName, cpuIds[i],
+                    flopsValues[i], time);
 
       // reset counter value
-      flopsValues[c] = -1.0;
+      flopsValues[i] = -1.0;
     }
   }
 
@@ -517,7 +742,7 @@ severity=okay time=$(date +%s) plugin=likwid message=rstCtrs" | nc -U
 static int likwid_plugin_notify(const notification_t *type, user_data_t *usr) {
   if (0 == strncmp(type->plugin, "likwid", 6)) {
     if (0 == strncmp(type->message, "rstCtrs", 7)) {
-      _resetCounters();
+      _setCounters();
     } else if (0 == strncmp(type->message, "disable", 7)) {
       INFO(PLUGIN_NAME ": Disable reading of Likwid metrics");
       plugin_disabled = true;
@@ -531,40 +756,9 @@ static int likwid_plugin_notify(const notification_t *type, user_data_t *usr) {
 }
 #endif
 
-static int likwid_plugin_finalize(void) {
-  INFO(PLUGIN_NAME ": %s:%d", __FUNCTION__, __LINE__);
-
-  // perfmon_finalize(); // segfault
-  affinity_finalize();
-  numa_finalize();
-  topology_finalize();
-
-  // free memory where CPU IDs are stored
-  // INFO(PLUGIN_NAME ": free allocated memory");
-  if (NULL != cpus) {
-    free(cpus);
-  }
-
-  if (NULL != metricGroups) {
-    for (int i = 0; i < numGroups; i++) {
-      // memory for group names have been allocated with strdup
-      if (NULL != metricGroups[i].name) {
-        free(metricGroups[i].name);
-      }
-    }
-    free(metricGroups);
-
-    if (flopsValues) {
-      free(flopsValues);
-    }
-  }
-
-  return 0;
-}
-
 static const char *config_keys[] = {
-    "NormalizeFlops",   "AccessMode", "Mtime",  "Groups",
-    "PerSocketMetrics", "MaxValues",  "Verbose"};
+    "NormalizeFlops",   "AccessMode", "Mtime",   "Groups",
+    "PerSocketMetrics", "MaxValues",  "PerCore", "Verbose"};
 static int config_keys_num = STATIC_ARRAY_SIZE(config_keys);
 
 static int likwid_plugin_config(const char *key, const char *value) {
@@ -577,11 +771,14 @@ static int likwid_plugin_config(const char *key, const char *value) {
   if (strcasecmp(key, "NormalizeFlops") == 0) {
     normalizeFlops = true;
     normalizedFlopsName = mystrdup(value);
+    INFO(PLUGIN_NAME ": nomalize FLOPS to single precision (%s)", normalizedFlopsName);
   } else if (strcasecmp(key, "AccessMode") == 0) {
     accessMode = atoi(value);
   } else if (strcasecmp(key, "Mtime") == 0) {
     mTime = atoi(value);
     INFO(PLUGIN_NAME ": measure each metric group for %d sec\n", mTime);
+  } else if (strcasecmp(key, "PerCore") == 0) {
+    summarizePerCore = true;
   } else if (strcasecmp(key, "Verbose") == 0) {
     likwid_verbose = atoi(value);
   } else if (strcasecmp(key, "Groups") == 0) {
@@ -669,11 +866,11 @@ static int likwid_plugin_config(const char *key, const char *value) {
     // free(myvalue);
   } else if (strcasecmp(key, "MaxValues") == 0) {
     // count number of thresholds
-    if(strlen(value) == 0){
+    if (strlen(value) == 0) {
       ERROR(PLUGIN_NAME ": Empty string for MaxValues is not allowed!");
       return 1;
     }
-    
+
     numMaxValues = 1;
     int i = 0;
     while (value[i] != '\0') {
@@ -690,7 +887,7 @@ static int likwid_plugin_config(const char *key, const char *value) {
             value);
       return 1; // config failed
     }
-    
+
     i = 0;
     char *max_ptr;
     char *myvalue =
@@ -698,12 +895,13 @@ static int likwid_plugin_config(const char *key, const char *value) {
     max_ptr = strtok(myvalue, &separator);
     while (max_ptr != NULL) {
       char *sep2 = strchr(max_ptr, ':');
-      
-      if(sep2 == NULL) {
-        ERROR(PLUGIN_NAME ": MaxValues requires a ':' as separator between metric and value!"); 
+
+      if (sep2 == NULL) {
+        ERROR(PLUGIN_NAME ": MaxValues requires a ':' as separator between "
+                          "metric and value!");
         return 1;
       }
-      
+
       maxValues[i].maxValue = strtod(sep2 + 1, NULL);
 
       // save metric name
@@ -757,6 +955,12 @@ int main(int argc, char *argv[]) {
       } else if (strncmp(argv[i], "-m", 2) == 0) {
         fprintf(stderr, "Measurement time %s\n", argv[i] + 2);
         likwid_plugin_config("Mtime", argv[i] + 2);
+      } else if (strncmp(argv[i], "-percore", 8) == 0) {
+        fprintf(stderr, "Summarize per core\n");
+        likwid_plugin_config("PerCore", "");
+      } else if (strncmp(argv[i], "-normalizeflops", 14) == 0) {
+        fprintf(stderr, "Normalize FLOPS\n");
+        likwid_plugin_config("NormalizeFlops", "flops_any");
       }
     }
   }
