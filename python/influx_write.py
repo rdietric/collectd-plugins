@@ -158,7 +158,7 @@ def _collect(valueList):
   tag = valueList.plugin_instance
 
   # first check for the tag, which is None for many plugins
-  is_per_core = tag and threads_per_core > 1 and valueList.plugin in per_core_plugins
+  is_per_core = tag and per_core_plugins and valueList.plugin in per_core_plugins
 
   # map to core
   if is_per_core:
@@ -218,7 +218,7 @@ def _send():
     return
 
   # Send data to InfluxDB (len(metrics) <= batch_count as NaN and inf are not moved from batch to metrics)
-  collectd.info('InfluxDB write: write %d lines (%d series)' % (len(metrics), batch_count))
+  collectd.info('InfluxDB write: %d lines (%d series)' % (len(metrics), batch_count))
   #collectd.info('InfluxDB write: %d lines (%d series incl. %d rates), %d aggregated' % (len(metrics), batch_count, len(batch_derive), num_aggregated) )
   #collectd.info(str(metrics))
 
@@ -296,7 +296,7 @@ def _prepare_metrics():
 
           # build average per core for respectively configured metrics
           # (assumes that no HW thread value got lost within a time group)
-          if threads_per_core > 1 and measurement in per_core_avg_plugins:
+          if per_core_avg_plugins and measurement in per_core_avg_plugins:
             #collectd.info("divide by thread/core: %s:%s = %f/%d=%f!" % (measurement,metricName,value, threads_per_core, value/threads_per_core) )
             value /= threads_per_core
 
@@ -427,16 +427,21 @@ def set_config(config):
         if store_rates:
           collectd.info("InfluxDB write: store rates for derived and counter types")
       elif value.key == 'PerCore':
-        global per_core_plugins
-        global per_core_avg_plugins
-        per_core_plugins = []
-        per_core_avg_plugins = []
-        for value in value.values:
-          #collectd.info(value)
-          v = value.split(':')
-          per_core_plugins.append(v[0])
-          if v[1] == 'avg':
-            per_core_avg_plugins.append(v[0])
+        if _setHWThreadMapping():
+          global per_core_plugins
+          global per_core_avg_plugins
+          per_core_avg_plugins = []
+          for value in value.values:
+            #collectd.info(value)
+            v = value.split(':')
+            if per_core_plugins is None:
+              per_core_plugins = []
+            per_core_plugins.append(v[0])
+
+            if v[1] == 'avg':
+              if per_core_avg_plugins is None:
+                per_core_avg_plugins = []
+              per_core_avg_plugins.append(v[0])
       else:
         collectd.info("InfluxDB write: ignore unknown option %s" % (value.key,))
 
@@ -450,11 +455,6 @@ def init_callback():
     collectd.info('InfluxDB write: influxdb.client.InfluxDBClient import failed.')
   else:
     #collectd.info('[InfluxDB Writer] Initialize.')
-    global per_core_plugins
-    if per_core_plugins:
-      if not _setHWThreadMapping():
-        per_core_plugins = None
-        
     _connect()
 
 
