@@ -185,7 +185,7 @@ static void _setupGroups() {
     return;
   }
 
-  INFO(PLUGIN_NAME ": Setup metric groups");
+  INFO(PLUGIN_NAME ": Setup metric group(s)");
 
   int numFlopMetrics = 0;
 
@@ -237,12 +237,20 @@ static void _setupGroups() {
           if (normalizeFlops && 0 == strncmp("flops", metrics[m].name, 5)) {
             numFlopMetrics++;
 
+            size_t flopsStrLen = strlen(metrics[m].name);
+
+            // if metric is named exactly like the user-defined normalized FLOPS name, normalization of FLOPS is not needed
+            if (0 == strcmp(normalizedFlopsName, metrics[m].name)) {
+              normalizeFlops = false;
+              metrics[m].xFlops = 0;
+              INFO(PLUGIN_NAME ": Found metric %s. No normalization needed.", metrics[m].name);
+            }
             // double precision to single precision = factor 2
-            if (0 == strncmp("dp", metrics[m].name + 6, 5)) {
+            else if (flopsStrLen >= 8 && 0 == strncmp("dp", metrics[m].name + 6, 2)) {
               metrics[m].xFlops = 2;
             }
             // // avx to single precision = factor 4
-            else if (0 == strncmp("avx", metrics[m].name + 6, 5)) {
+            else if (flopsStrLen >= 9 && 0 == strncmp("avx", metrics[m].name + 6, 3)) {
               metrics[m].xFlops = 4;
             } else // assume single precision otherwise
             {
@@ -293,7 +301,7 @@ static void _setupGroups() {
   // check if FLOPS have to be aggregated (if more than one FLOP metric is
   // collected), which requires to allocate memory for each metric per core
   if (numFlopMetrics > 1) {
-    INFO(PLUGIN_NAME ": Different FLOPS are aggregated and normalized.");
+    INFO(PLUGIN_NAME ": Different FLOPS are aggregated.");
     summarizeFlops = true;
 
     flopsValues = (double *)malloc(numThreads * sizeof(double));
