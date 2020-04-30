@@ -2,13 +2,12 @@
 # coding=utf-8
 
 """
-Collect data from Lustre file system
+Collect data from Lustre file systems.
 
 Author: Robert Dietrich (robert.dietrich@tu-dresden.de)
 
-#### Dependencies
-
- * [subprocess](http://docs.python.org/library/subprocess.html)
+Dependencies:
+[subprocess](http://docs.python.org/library/subprocess.html)
 """
 
 import time
@@ -32,7 +31,8 @@ POS_FSNAME = 1
 POS_ENABLED = 2
 POS_PREV_DATA = 3
 
-_KEY_MAPPING = [
+# Lustre meta data operations
+KEY_MAPPING = [
   'open',
   'close',
   'fsync',
@@ -40,18 +40,32 @@ _KEY_MAPPING = [
   'seek'
 ]
 
-# lustre stats files are located depending on the lustre version
-DEFAULT_LUSTRE_SEARCH_PATHS=['/sys/kernel/debug/lustre/llite/','/proc/fs/lustre/llite/']
+# Lustre stats files are located depending on the Lustre version
+# make sure that the paths end with a slash
+DEFAULT_LUSTRE_SEARCH_PATHS = [
+  '/sys/kernel/debug/lustre/llite/',
+  '/proc/fs/lustre/llite/'
+]
 ### END: constants ###
 
 ### global variables ###
+# controls whether plugin is enabled or disabled
 enabled = False
 
-# comma separated list of Lustre file system instance paths (where stats file is located)
-lustrePaths = None
+# Lustre file system instance paths (where stats file is located), set via conf
+confLustreInstancesPath = None
+
+# Lustre instances (fsname-MAGICNUM), set via conf
+confLustreInstances = None
 
 # array of <fs name>:<relative mount subdirectory> (via configuration)
-fsNameAndMountList = []
+confFsNameMountList = None
+
+# path where Lustre instances with stats file are located
+lustrePath = None
+
+# list of monitored Lustre instances
+lustreInstances = None
 
 # time stamp of previous value dispatch
 timePrev = 0
@@ -63,6 +77,19 @@ fsInfo = []
 numReads = 0
 checkSourcesInterval = 0 # number of intervals/reads after re-checking available file systems (default is off: 0)
 ### END: global variables ###
+
+"""
+Check if one of the default search paths exists and set it as Lustre instances
+path. This functions assumes that only one path exists and takes the first path
+in the list that exists.
+"""
+def _setLustrePath():
+  for searchPath in DEFAULT_LUSTRE_SEARCH_PATHS:
+    if os.path.exists(searchPath):
+      global lustrePath
+      lustrePath = searchPath
+      collectd.info("lustre plugin: Use Lustre path '%s'" % (searchPath,) )
+      return
 
 # "lfs getname": 
 # scratch2-ffff984743280800 /lustre/scratch2
@@ -79,7 +106,7 @@ def _getMatchingInstances():
 
   # a zero status means without errors, 13 means permission denied (maybe only for some mounts)
   if status != 0 and status != 13:
-    collectd.info("lustre plugin: Get lustre mount points failed (status: %s): %s" % (status, result))
+    collectd.info("lustre plugin: Get lustre mount points failed (status: %s): %s" % (status, result))    
 
   fs_name_mount_map = {}
   fs_name_instance_map = {}
@@ -103,14 +130,14 @@ def _getMatchingInstances():
     fs_mount = larray[1]
 
     # if configuration provides file system names together with relative mount points
-    if len(fsNameAndMountList) > 0:
+    if confFsNameMountList is not None:
       # for all configuration provided file system mounts
-      for fsNameMount in fsNameAndMountList:
+      for fsNameMount in confFsNameMountList:
         conf_fsname, conf_mount = fsNameMount.split(":", 1)
 
         # allow asterix to search for all file systems
         if conf_fsname == '*':
-          conf_fsname = ''
+          conf_fsname = '' # empty string is part of every string
 
         if conf_fsname in fs_instance and fs_mount.endswith(conf_mount):
           if conf_fsname == '':
@@ -136,74 +163,90 @@ def _getMatchingInstances():
 
   return fs_name_instance_map.values()
 
-# Return an array of lustre instance paths (either from config file or by searching in DEFAULT_LUSTRE_SEARCH_PATHS)
-def _getLustreInstancePaths():
-  if lustrePaths != None:
-    collectd.debug( "lustre plugin: Use lustre paths %s from config file" % (lustrePaths,))
-    return lustrePaths.split(',')
+"""
+Check if there is only one instance per file system name.
+Return True, if there are multiple instances per file system. Sets also the 
+global variable haveMultipleInstancesPerFS.
+"""
+def _haveMultipleFsInstances(instances):
+  fsNameArray = []
+  for fsInstance in instances:
+    if fsInstance is None:
+      continue
+    
+    fsName = fsInstance.split('-',1)[0]
+    if fsName in fsNameArray:
+      return True
+    fsNameArray.append(fsName)
+
+  return False
+
+"""
+Return a list of Lustre instance paths. Requires Lustre path to be set. 
+"""
+def _getAllLustreInstances():
+  if lustrePath is None:
+    collectd.error("lustre plugin: Lustre path is not set!")
+    return []
+  # find file systems
+  #cmd = 'find ' + lustrePath + '* -maxdepth 0 -type d 2>/dev/null'
+  #cmd = 'ls -d ' + lustrePath + '*' # list content of lustrePath with full path
+  cmd = 'ls ' + lustrePath # list content of lustrePath
+  try:
+    p = subprocess.Popen( cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE )
+    stdout, stderr = p.communicate()
+  except subprocess.CalledProcessError as e:
+    collectd.info("lustre plugin: %s error launching: %s; skipping" % (repr(e), cmd))
+    return []
   else:
-    fsArray = []
-    # find file systems
-    #cmd = 'find ' + DEFAULT_LUSTRE_SEARCH_PATH + '* -maxdepth 0 -type d 2>/dev/null'
+    stdout= stdout.decode('utf-8')
 
-    # list the full paths
-    for searchPath in DEFAULT_LUSTRE_SEARCH_PATHS:
-      if not os.path.exists(searchPath):
-        continue
+  if stdout == '':
+    collectd.info("lustre plugin: No file systems found: %s" % (cmd,))
+    return []
 
-      cmd = 'ls -d ' + searchPath + '*'
-      try:
-        p = subprocess.Popen( cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE )
-        stdout, stderr = p.communicate()
-      except subprocess.CalledProcessError as e:
-        collectd.info("lustre plugin: %s error launching: %s; skipping" % (repr(e), cmd))
-        return []
-      else:
-        stdout= stdout.decode('utf-8')
+  #collectd.info("lustre plugin: Found Lustre instance paths: %s" % (stdout,))
+  lustreInstances = stdout.split('\n')
+  lustreInstances.remove("") # remove empty lines
+  return lustreInstances
 
-      if stdout == '':
-        collectd.info("lustre plugin: No file systems found: %s" % (cmd,))
-        return []
+"""
+Determines the Lustre intances that should be monitored. 
+"""
+def _setLustreInstances():
+  global lustreInstances
 
-      #collectd.info("lustre plugin: Found Lustre instance paths: %s" % (stdout,))
-      
-      fsArray = stdout.split('\n')
-      fsArray.remove("") # remove empty string
+  # check whether specific Lustre instances should be monitored
+  if confLustreInstancesPath is not None and confLustreInstances is not None:
+    if not confLustreInstancesPath.endswith('/'):
+      confLustreInstancesPath + "/"
 
-    return fsArray
+    for instance in confLustreInstances:
+      collectd.info( "lustre plugin: Monitor %s%s (see conf file)" % (confLustreInstancesPath, instance))
 
+    lustreInstances = confLustreInstances
+  else:
+    lustreInstances = _getAllLustreInstances()
+  
+    # if we have multiple Lustre instances per file system, determine the 
+    # instances that should be monitored
+    if _haveMultipleFsInstances(lustreInstances):
+      lustreInstances = _getMatchingInstances()
+
+"""
+Setup the Lustre instance paths, where stats files are located.
+"""
 def _setupLustreFiles():
   global fsInfo
   fsInfo = []
 
-  relevant_instances = _getMatchingInstances()
-  
-  for fsPath in _getLustreInstancePaths():
-    if not fsPath:
-      continue
+  for fsInstance in lustreInstances:    
+    fsName = fsInstance.split('-',1)[0]
 
-    p_start = fsPath.rfind('/')
-    p_end   = fsPath.rfind('-')
+    collectd.info("lustre plugin: Collect data for '%s'" % (fsInstance,))
 
-    # no '/' found
-    if p_start == -1:
-      collectd.info("lustre plugin: no start slash")
-      continue
-
-    # no '-' found
-    if p_end == -1:
-      p_end = fsPath.len()
-
-    fs_instance = fsPath[(p_start + 1):]
-
-    # setup only relevant mounts
-    if fs_instance not in relevant_instances:
-      continue
-
-    collectd.info("lustre plugin: Collect data for '%s' from '%s'" % (fsPath[p_start+1:p_end],fsPath))
-
-    fsInfo.append( fsPath + '/stats' ) # full path to the Lustre stats file
-    fsInfo.append( fsPath[ p_start + 1 : p_end ] ) # name of file system, e.g. scratch
+    fsInfo.append( lustrePath + fsInstance + '/stats' ) # full path to the Lustre stats file
+    fsInfo.append( fsName ) # name of file system, e.g. scratch
     fsInfo.append( False ) # first, disable the file system
 
     # append array entry for lustre offset dictionary
@@ -250,23 +293,29 @@ def _setPrevValues():
     global timePrev
     timePrev = time.time()
         
-# check if there are file systems available, which are not monitored yet
-def _haveNewFS():        
-  for fsInstanceNew in _getMatchingInstances():
+"""
+Check if there are file system instances available, which are not monitored yet.
+Return True, if a new file system instance has been found.
+"""
+def _haveNewFS():
+  for instance in lustreInstances:
     newFS=True
-    # mark the FS as not new, if it is in the current list
-    for idx in range( 0, len(fsInfo)-1, FS_ENTRIES):      
-      if fsInstanceNew in fsInfo[ idx ]:
+    # mark the FS instance as not new, if it is in the current list
+    for idx in range( 0, len(fsInfo)-1, FS_ENTRIES):
+      # fsInfo provides the full paths with the instances at the end
+      if instance in fsInfo[ idx ]:
         newFS = False
         break
     
     if newFS:
-      collectd.info("lustre plugin: Found new Lustre instance %s!" % (fsInstanceNew,))
+      collectd.info("lustre plugin: Found new Lustre instance %s!" % (instance,))
       return True
     
   return False
 
-# Check for the existence of the stats files and enable/disable.
+""" 
+Check for the existence of the stats files and enable/disable.
+"""
 def _checkLustreStatsFiles():
   # iterate over file system info list in steps of FS_ENTRIES
   for idx in range( 0, len(fsInfo)-1, FS_ENTRIES):
@@ -278,25 +327,32 @@ def _checkLustreStatsFiles():
       fsInfo[idx + POS_ENABLED] = True
       collectd.info("lustre plugin: Enable reading from %s." % (fsInfo[idx],))
 
-# Parse the lustre stats file
-# return dictionary with metric names (key) and value (value)
-# TODO: catch index out of bound exceptions if stats file format changes
+"""
+Parse the lustre stats file.
+Return dictionary with metric names (key) and value (value)
+"""
 def _parseLustreStats(finput):
   lustrestat = {}
-  for line in filter( None, finput.split('\n') ):
-    linelist = line.split() #re.split( "\s+", line ) #split is faster than re.split
-    if linelist[0] == "read_bytes":
-      lustrestat["read_requests"] = float(linelist[1]) #do not record, can be generated from extended stats
-      lustrestat["read_bw"] = float(linelist[6])
-    elif linelist[0] == "write_bytes":
-      lustrestat["write_requests"] = float(linelist[1]) #do not record, can be generated from extended stats
-      lustrestat["write_bw"] = float(linelist[6])
-    elif linelist[0] in _KEY_MAPPING:
-      lustrestat[linelist[0]] = float(linelist[1])
+  try:
+    for line in filter( None, finput.split('\n') ):
+      linelist = line.split() #re.split( "\s+", line ) #split is faster than re.split
+      if linelist[0] == "read_bytes":
+        lustrestat["read_requests"] = float(linelist[1]) 
+        lustrestat["read_bw"] = float(linelist[6])
+      elif linelist[0] == "write_bytes":
+        lustrestat["write_requests"] = float(linelist[1]) 
+        lustrestat["write_bw"] = float(linelist[6])
+      elif linelist[0] in KEY_MAPPING:
+        lustrestat[linelist[0]] = float(linelist[1])
+  except IndexError:
+    collectd.error("lustre plugin: Index error in parsing lustre stats")
 
   return lustrestat
 
-def _publishLustreMetrics(fsIdx, lustreMetrics, timestamp): 
+"""
+Dispatch acquired metrics.
+"""
+def _dispatchLustreMetrics(fsIdx, lustreMetrics, timestamp): 
     fsname   = fsInfo[ fsIdx + POS_FSNAME ]
     previous = fsInfo[ fsIdx + POS_PREV_DATA ]
 
@@ -327,38 +383,49 @@ def _publishLustreMetrics(fsIdx, lustreMetrics, timestamp):
       else:
         collectd.debug("lustre plugin: %d: bandwidth < 0 (current: %f, previous available? %s" % (timestamp, lustreMetrics[ metric ], metric in previous))
 
+"""
+Collectd configuration callback
+"""
 def lustre_plugin_config(config):
   if config.values[0] == 'lustre_bw':
     collectd.info("lustre plugin: Get configuration")
     for value in config.children:
       if value.key == 'path':
-        global lustrePaths
-        lustrePaths = value.values[0]
-        collectd.info("lustre plugin: Paths to lustre file system instance stat files: %s" % (lustrePaths,))
+        global confLustreInstancesPath
+        confLustreInstancesPath = value.values[0]
+        collectd.info("lustre plugin: Paths to Lustre file system instances: %s" % (confLustreInstancesPath,))
+      elif value.key == 'instances':
+        global confLustreInstances
+        confLustreInstances = value.values[0].split(",")
       elif value.key == 'fsname_and_mount':
-        global fsNameAndMountList
+        global confFsNameMountList
+        if confFsNameMountList is None:
+          confFsNameMountList = []
         # assume that the values are: <file system name>:<relative mount directory>
-        fsNameAndMountList.append(value.values[0])
+        confFsNameMountList.append(value.values[0])
       elif value.key == 'recheck_limit':
         global checkSourcesInterval
         checkSourcesInterval = int(value.values[0])
         if checkSourcesInterval > 0:
-          collectd.info("lustre plugin: Check for available lustre file systems every %d collects" % (checkSourcesInterval,))
+          collectd.info("lustre plugin: Check for available Lustre file systems every %d reads" % (checkSourcesInterval,))
       
-
+"""
+Collectd plugin initialization callback.
+"""
 def lustre_plugin_initialize():
   collectd.debug("lustre plugin: Initialize ...")
 
   #collectd.info("Python version: %d.%d.%d" % (sys.version_info[0], sys.version_info[1], sys.version_info[2]))
 
-  # setup lustre file paths and initialize previous values
+  # the order of the following function calls is important
+  _setLustrePath()
+  _setLustreInstances()
   _setupLustreFiles()
-
   _checkLustreStatsFiles()
 
 
 """
-brief Read send and receive counters from Infiniband devices
+Read the lustre stats files for all setup lustre instances.
 """
 def lustre_plugin_read(data=None):
   #self.log.debug( "Collect %d ? %d", num_reads, recheck_limit)
@@ -369,7 +436,10 @@ def lustre_plugin_read(data=None):
   
   # check for available file systems
   if numReads == checkSourcesInterval:
-    if _haveNewFS():
+    # check, if the Lustre path changed
+    _setLustrePath()
+    _setLustreInstances()
+    if _haveNewFS(): # this should happen very rarely
       _setupLustreFiles()
       _checkLustreStatsFiles()
       return
@@ -409,21 +479,22 @@ def lustre_plugin_read(data=None):
     else:
       # parse the data into dictionary (key is metric name, value is metric value)
       lustrestat = _parseLustreStats( finput )
-
-      # publish the metrics
-      _publishLustreMetrics( idx, lustrestat, timestamp )
+      _dispatchLustreMetrics( idx, lustrestat, timestamp )
 
   global timePrev
   timePrev = timestamp
 
-# paste on command line
-#echo "PUTNOTIF severity=okay time=$(date +%s) message=hello" | socat - UNIX-CLIENT:/home/rdietric/sw/collectd/5.8.0/var/run/collectd-unixsock
+"""
+Handle notifications, e.g. trigger check and enable/disable reading.
+To trigger this function, use the socket plugin and in a terminal: 
+echo "PUTNOTIF severity=okay time=$(date +%s) message=hello" | socat - UNIX-CLIENT:collectdSocketFile.sock
+"""
 def lustre_plugin_notify(notification, data=None):
+  global enabled
   #collectd.info("lustre plugin: Notification: %s" % (str(notification),))
   
-  # for severity okay (4)
-  if notification.severity == 4 and notification.message == "check":
-    collectd.info("lustre plugin: Check Lustre files ...")
+  if notification.message == "check":
+    collectd.info("lustre plugin: Check Lustre files.")
     if _haveNewFS():
       _setupLustreFiles()
     
@@ -432,7 +503,13 @@ def lustre_plugin_notify(notification, data=None):
     # reset check counter
     global numReads
     numReads = 0
-
+  elif notification.message == "disable":
+    collectd.info("lustre plugin: Disable reading")
+    enabled = False
+  elif notification.message == "enable":
+    collectd.info("lustre plugin: Enable reading")
+    enabled = True
+    # check of file system stats files is independently (periodically) triggered
 
 if __name__ != "__main__":
   # when running inside plugin register each callback
@@ -445,7 +522,7 @@ else:
 
   ### manual configuration ###
   # for all file systems, where mount poinst end with /ws
-  fsNameAndMountList.append("*:/ws")
+  confFsNameMountList = ["*:/ws"]
   # test re-check
   checkSourcesInterval = 5
 
