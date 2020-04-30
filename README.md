@@ -1,21 +1,23 @@
 # Additional Python and C plugins for collectd
 ## Read plugins
 * LIKWID (C)
-* Infiniband send and receive bandwidth (Python)
-* Lustre read and write bandwidth as well as metadata (Python)
+* Infiniband send and receive bandwidth (Python 3)
+* Lustre read and write bandwidth as well as metadata (Python 3)
 
 ## Write Plugins
 * InfluxDB (Python)
 
 # Installation (Requirements)
-To plugins have been developed for collectd 5.9.0. However, they should work with other versions of collectd. Make sure that Python is available before installing collectd. If you have an existing Python 3 installation, it should be sufficient to install influxdb and nvidia-ml-py via pip3.
+To plugins have been developed for collectd 5.9.0. However, they should work with other versions of collectd. Make sure that Python 3 is available before installing collectd. If you have an existing Python 3 installation, it should be sufficient to install influxdb via pip3.
 
 ## Python
-The Python plugins are written for Python3. 
+The Python plugins are written for Python 3. 
 
-Build Python from sources (including InfluxDB and NVML modules):
+Build Python from sources (including InfluxDB):
 ~~~~
-# get Python3 sources
+PYTHON_VERSION=3.X.X
+
+# get Python sources
 wget https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz
 tar xvfJ Python-${PYTHON_VERSION}.tar.xz
 
@@ -30,22 +32,20 @@ export LD_LIBRARY_PATH=${DEST_INST}/lib:${DEST_INST}/lib/python3.7:$LD_LIBRARY_P
 
 pip3 install --upgrade pip
 
-# install InfluxDB and NVML modules
+# install InfluxDB module
 pip3 install influxdb
-pip3 install nvidia-ml-py # need for the collectd GPU-CUDA (NVML) plugin
 ~~~~
 
 ## Collectd
-A fix for the CUDA-GPU (NVML) plugin and the new *StartRead* setting is available with the branch *prope* of https://github.com/rdietric/collectd.git.
+To use the *AlignRead* and *AlignReadOffset* options in the Collectd configuration file, a patch from the patches folder has to be applied. A respective pull request has been opened (https://github.com/collectd/collectd/pull/3327).
 
-If you use a release version of collectd, the *StartRead* setting will not work. 
-StartRead defines for each read plugin, when the first read operation should take place. It is given seconds. Values between 0 and 59 define the start second in a minute and values greater or equal 60 the minute in an hour. The fraction (value after the dot) defines the millisecond of a second.
+If *AlignRead* is set to *true*, the call to read functions is time aligned to a multiple of the read interval, which allows round timestamps or the same timestamps across systems to be recorded. *AlignReadOffset* specifies an offset, in seconds, the call to time-aligned read functions is delayed.
 
 Build collectd from sources:
 ~~~~
 # get collectd sources
 git clone https://github.com/rdietric/collectd.git
-git checkout prope
+git checkout alignread
 
 # configure collectd build
 cd collectd
@@ -61,10 +61,6 @@ export C_INCLUDE_PATH=$PWD/src:$PWD/src/daemon:$CUDA_PATH/include:$C_INCLUDE_PAT
 # build and install collectd
 make -j; make install
 ~~~~
-
-There are open pull request for the StartRead setting and an improvement for the CUDA-GPU (NVML) plugin:
-https://github.com/collectd/collectd/pull/3327  
-https://github.com/collectd/collectd/pull/3264
 
 ## LIKWID
 Likwid is available at https://github.com/RRZE-HPC/likwid.git. You can also use a release version and apply a patch in the folder *patches* (if available).
@@ -108,7 +104,7 @@ For testing purposes collectd can be run in foreground with `-f`:
 $COLLECTD_INSTALL_PATH/sbin/collectd -f -C $PATH_TO_COLLECTD_CONF/collectd.conf
 ~~~~
 
-There is a sample configuration file for collectd in the top directory of this repo (*collectd_prope.conf*). Before running collectd, paths in this file have to be adapted, e.g. the path to `custom_types.db`, which is needed for the likwid plugin. You should also disable plugins (comment out), where the resources are not available on the system, e.g. lustre and infiniband, if you are working on your own notebook.
+There is a sample configuration file for collectd in the top directory of this repo (*pika_collectd.conf*). Before running collectd, paths in this file have to be adapted, e.g. the path to `custom_types.db`, which is needed for the likwid plugin. You should also disable plugins (comment out), where the resources are not available on the system, e.g. lustre and infiniband, if you are working on your own notebook.
 
 ## Likwid
 If you use Likwid with perf_event as access mode, you may not have permission to collect metrics. 
