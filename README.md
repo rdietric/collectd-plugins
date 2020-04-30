@@ -8,7 +8,7 @@
 * InfluxDB (Python)
 
 # Installation (Requirements)
-The plugins have been tested with Collectd 5.10.0m but should also work with other versions. Make sure that Python 3 is available before installing Collectd. If you have an existing Python 3 installation, it should be sufficient to install influxdb via pip3.
+The plugins have been tested with Collectd 5.10.0, but should also work with other versions. Make sure that Python 3 is available before installing Collectd. If you have an existing Python 3 installation, it should be sufficient to install influxdb via pip3.
 
 ## Python
 The Python plugins are written for Python 3. 
