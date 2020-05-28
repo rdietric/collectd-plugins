@@ -16,6 +16,8 @@
 
 static int test_plugin_read_complex(user_data_t *ud) {
   INFO(PLUGIN_NAME ": %s:%d", __FUNCTION__, __LINE__);
+  
+  return 0;
 }
 
 static int test_plugin_read(void) {  

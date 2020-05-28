@@ -25,11 +25,11 @@ except ImportError:
 from subprocess import Popen, PIPE, STDOUT
 
 ### constants ###
-# number of array entries per file system and positions
-FS_ENTRIES = 4 # tuple of three
+# number of list entries per Lustre instance and positions
+FS_ENTRIES = 3
+POS_STATS_FILE = 0 # not used
 POS_FSNAME = 1
-POS_ENABLED = 2
-POS_PREV_DATA = 3
+POS_PREV_DATA = 2
 
 # Lustre meta data operations
 KEY_MAPPING = [
@@ -70,8 +70,9 @@ lustreInstances = None
 # time stamp of previous value dispatch
 timePrev = 0
 
-# file systems info array: 
-# 3 entries per file system (full file system path, file system name, dict of last metrics values)
+# Lustre instances information list: 
+# FS_ENTRIES entries per instance (path to stats file, file system name, 
+# dict of last metrics values)
 fsInfo = []
         
 numReads = 0
@@ -247,7 +248,6 @@ def _setupLustreFiles():
 
     fsInfo.append( lustrePath + fsInstance + '/stats' ) # full path to the Lustre stats file
     fsInfo.append( fsName ) # name of file system, e.g. scratch
-    fsInfo.append( False ) # first, disable the file system
 
     # append array entry for lustre offset dictionary
     fsInfo.append( {} )
@@ -264,10 +264,20 @@ def _setupLustreFiles():
 
   return len(fsInfo)
 
+"""
+Remove Lustre instance from global list via index to the stats file path.
+"""
+def _removeInstances(idxList):
+  for idx in idxList:
+    del fsInfo[idx:idx+FS_ENTRIES]
         
-# set initial values for each file system
+"""
+Set initial values for each Lustre intsance to determine difference (increase).
+"""
 def _setPrevValues():
   global enabled
+
+  deleteList = None
   for idx in range( 0, len(fsInfo)-1, FS_ENTRIES):
     statsFile = fsInfo[ idx ]
     
@@ -281,15 +291,23 @@ def _setPrevValues():
       f.close()
     except IOError as ioe:
       collectd.info( "lustre plugin: Cannot read from %s (%s)" % (statsFile, repr(ioe),))
-      fsInfo[ idx + POS_ENABLED ] = False
+      
+      # add Lustre instance to delete list
+      if deleteList is None:
+        deleteList = [idx]
+      else:
+        deleteList.append(idx)
       continue
     else:
       enabled = True
-      fsInfo[ idx + POS_ENABLED ] = True
       stats_offsets = _parseLustreStats( finput )
       fsInfo[ idx + POS_PREV_DATA ].update( stats_offsets )
 
-    # store timestamp of previous data
+  if deleteList is not None:
+    _removeInstances(deleteList)
+
+  # store timestamp of previous data
+  if enabled:
     global timePrev
     timePrev = time.time()
         
@@ -314,18 +332,25 @@ def _haveNewFS():
   return False
 
 """ 
-Check for the existence of the stats files and enable/disable.
+Check for the existence of the stats files and clean up global list of Lustre 
+instance data. Delete a Lustre instance instead of disable it, when mounting 
+again the instance magic ID probably changes and we want to avoid long lists
+with many disabled instances that will never get enabled again.
 """
 def _checkLustreStatsFiles():
+  deleteList = None
   # iterate over file system info list in steps of FS_ENTRIES
   for idx in range( 0, len(fsInfo)-1, FS_ENTRIES):
     # disable file system, if stats file does not exist
     if not os.path.isfile(fsInfo[idx]):
-      fsInfo[idx + POS_ENABLED] = False
-      collectd.warning("lustre plugin: Disable reading from %s (file not found)." % (fsInfo[idx],))
-    elif fsInfo[idx + POS_ENABLED] == False:
-      fsInfo[idx + POS_ENABLED] = True
-      collectd.info("lustre plugin: Enable reading from %s." % (fsInfo[idx],))
+      collectd.warning("lustre plugin: Stop reading from %s (file not found)." % (fsInfo[idx],))
+      if deleteList is None:
+        deleteList = [idx]
+      else:
+        deleteList.append(idx)
+
+  if deleteList is not None:
+    _removeInstances(deleteList)
 
 """
 Parse the lustre stats file.
@@ -384,6 +409,27 @@ def _dispatchLustreMetrics(fsIdx, lustreMetrics, timestamp):
         collectd.debug("lustre plugin: %d: bandwidth < 0 (current: %f, previous available? %s" % (timestamp, lustreMetrics[ metric ], metric in previous))
 
 """
+Check for Lustre files. Return True, if a new file instance was found.
+"""
+def _run_check():
+  ret = False
+
+  _setLustrePath()
+  _setLustreInstances()
+
+  if _haveNewFS(): # this should happen very rarely
+    _setupLustreFiles()
+    ret = True
+
+  _checkLustreStatsFiles()
+
+  # reset check counter
+  global numReads
+  numReads = 0
+
+  return ret
+
+"""
 Collectd configuration callback
 """
 def lustre_plugin_config(config):
@@ -425,7 +471,7 @@ def lustre_plugin_initialize():
 
 
 """
-Read the lustre stats files for all setup lustre instances.
+Read the Lustre stats files for all setup Lustre instances.
 """
 def lustre_plugin_read(data=None):
   #self.log.debug( "Collect %d ? %d", num_reads, recheck_limit)
@@ -436,18 +482,9 @@ def lustre_plugin_read(data=None):
   
   # check for available file systems
   if numReads == checkSourcesInterval:
-    # check, if the Lustre path changed
-    _setLustrePath()
-    _setLustreInstances()
-    if _haveNewFS(): # this should happen very rarely
-      _setupLustreFiles()
-      _checkLustreStatsFiles()
+    # check, if the Lustre setup changed
+    if _run_check():
       return
-    else:
-      _checkLustreStatsFiles()
-        
-    # reset check counter
-    numReads = 0
 
   if not enabled:
     return
@@ -459,11 +496,8 @@ def lustre_plugin_read(data=None):
 
   # iterate over file system info list in steps of FS_ENTRIES (as we have FS_ENTRIES entries per file system)
   #self.log.debug("[LustreCollector] %d, %d", len(self.fsInfo)-1, FS_ENTRIES)
+  deleteList = None
   for idx in range( 0, len(fsInfo)-1, FS_ENTRIES):
-    # skip disabled file systems
-    if fsInfo[ idx + POS_ENABLED ] == False:
-      continue
-
     statsFile = fsInfo[ idx ]
     if not statsFile:
       continue
@@ -474,12 +508,18 @@ def lustre_plugin_read(data=None):
       finput = f.read()
       f.close()
     except IOError as ioe:
-      collectd.error("lustre plugin: Cannot read %s (%s). Disable reading!" % (statsFile, repr(ioe)))
-      fsInfo[ idx + POS_ENABLED ] = False
+      collectd.error("lustre plugin: Cannot read %s (%s). Stop reading!" % (statsFile, repr(ioe)))
+      if deleteList is None:
+        deleteList = [idx]
+      else:
+        deleteList.append(idx)
     else:
       # parse the data into dictionary (key is metric name, value is metric value)
       lustrestat = _parseLustreStats( finput )
       _dispatchLustreMetrics( idx, lustrestat, timestamp )
+
+  if deleteList is not None:
+    _removeInstances(deleteList)
 
   global timePrev
   timePrev = timestamp
@@ -490,26 +530,30 @@ To trigger this function, use the socket plugin and in a terminal:
 echo "PUTNOTIF severity=okay time=$(date +%s) message=hello" | socat - UNIX-CLIENT:collectdSocketFile.sock
 """
 def lustre_plugin_notify(notification, data=None):
-  global enabled
   #collectd.info("lustre plugin: Notification: %s" % (str(notification),))
-  
-  if notification.message == "check":
-    collectd.info("lustre plugin: Check Lustre files.")
-    if _haveNewFS():
-      _setupLustreFiles()
-    
-    _checkLustreStatsFiles()
-        
-    # reset check counter
-    global numReads
-    numReads = 0
-  elif notification.message == "disable":
-    collectd.info("lustre plugin: Disable reading")
-    enabled = False
-  elif notification.message == "enable":
-    collectd.info("lustre plugin: Enable reading")
-    enabled = True
-    # check of file system stats files is independently (periodically) triggered
+  if notification.plugin is None or notification.plugin == "" or notification.plugin == "lustre_bw":
+    global enabled
+    if notification.message == "check":
+      collectd.info("lustre plugin: Check Lustre files.")
+      _run_check()
+    elif notification.message == "disable":
+      collectd.info("lustre plugin: Disable reading")
+      enabled = False
+    elif notification.message == "enable":
+      collectd.info("lustre plugin: Enable reading")
+      enabled = True
+    elif notification.message == "unregister":
+      collectd.info("lustre plugin: Unregister read callback ...")
+      try:
+        collectd.unregister_read(lustre_plugin_read)
+      except:
+        collectd.error("lustre plugin: Could not unregister read callback!")
+    elif notification.message == "register":
+      collectd.info("lustre plugin: Register read callback ...")
+      try:
+        collectd.register_read(lustre_plugin_read)
+      except:
+        collectd.error("lustre plugin: Could not register read callback!")
 
 if __name__ != "__main__":
   # when running inside plugin register each callback
@@ -521,10 +565,12 @@ else:
   # outside plugin just collect the info
 
   ### manual configuration ###
+  DEFAULT_LUSTRE_SEARCH_PATHS.append('/home/rdietric/svn_local/collectd-plugins/python/LUSTRE_PATH/')
+
   # for all file systems, where mount poinst end with /ws
   confFsNameMountList = ["*:/ws"]
   # test re-check
-  checkSourcesInterval = 5
+  checkSourcesInterval = 4
 
   # initialize plugin and read once
   lustre_plugin_initialize()

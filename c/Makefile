@@ -7,8 +7,8 @@ COLLECTD_BUILD_DIR ?= $(COLLECTD_SRC)/..
 COLLECTD_INC = $(COLLECTD_ROOT)/include/collectd
 
 CC      = gcc
-CFLAGS  = -g -I$(LIKWID_ROOT)/include -I$(COLLECTD_INC) -I$(COLLECTD_SRC) -I$(COLLECTD_SRC)/daemon -I$(COLLECTD_SRC)/utils/common/ -I$(COLLECTD_BUILD_DIR)/src
-LDFLAGS = -L$(LIKWID_ROOT)/lib -L$(COLLECTD_ROOT)
+CFLAGS  = -g -Wall -I$(LIKWID_ROOT)/include -I$(COLLECTD_INC) -I$(COLLECTD_SRC) -I$(COLLECTD_SRC)/daemon -I$(COLLECTD_SRC)/utils/common/ -I$(COLLECTD_BUILD_DIR)/src
+LDFLAGS = -L$(LIKWID_ROOT)/lib -L$(COLLECTD_ROOT) -lm
 
 EXECUTABLE=test_likwid
 OBJECTS=*.o
@@ -23,6 +23,9 @@ influxdb:
 
 test_likwid:
 	$(CC) -DHAVE_CONFIG_H -DTEST_LIWKID $(CFLAGS) -o test_likwid likwid.c $(LDFLAGS) -llikwid
+
+topo: likwid_get_allocation.c
+	$(CC) $(CFLAGS) -o topo likwid_get_allocation.c $(LDFLAGS) -llikwid
 
 testplugin:
 	$(CC) -DHAVE_CONFIG_H $(CFLAGS) -shared -fpic -o $(COLLECTD_ROOT)/lib/collectd/testplugin.so test_plugin.c

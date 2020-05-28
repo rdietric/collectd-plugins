@@ -65,22 +65,22 @@ def which(program):
 # reset counters, if perfquery is available
 def _reset_counters():
   if perfquery_filepath:
-    collectd.debug("infiniband plugin: Reset counters!")
+    collectd.debug("ib_bw plugin: Reset counters!")
     try:
       proc = subprocess.Popen([perfquery_filepath], stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
       (out, err) = proc.communicate()
     except subprocess.CalledProcessError as e:
-      collectd.info("infiniband plugin: %s error launching: %s; skipping" % (perfquery_filepath, e))
+      collectd.info("ib_bw plugin: %s error launching: %s; skipping" % (perfquery_filepath, e))
       return -1
     else:
       if proc.returncode:
-        collectd.error("infiniband plugin: %s return exit value %s; skipping" % (perfquery_filepath, proc.returncode))
+        collectd.error("ib_bw plugin: %s return exit value %s; skipping" % (perfquery_filepath, proc.returncode))
         return -1
       if err:
-        collectd.error("infiniband plugin: %s return error output: %s" % (perfquery_filepath, err))
+        collectd.error("ib_bw plugin: %s return error output: %s" % (perfquery_filepath, err))
         return -1
   else:
-    collectd.info("infiniband plugin: Cannot reset counters!" )
+    collectd.info("ib_bw plugin: Cannot reset counters!" )
     
 """
 brief Determine the files and paths where the IB counters are read from. 
@@ -95,7 +95,7 @@ def _setupSourcefiles():
   # if no devices are explicitly specified, detect them
   if devices == None:
     if not os.path.isdir( directory ):
-      collectd.error("infiniband plugin: Infiniband directory %s does not exist!" % (directory,))
+      collectd.error("ib_bw plugin: Infiniband directory %s does not exist!" % (directory,))
       return
 
     # find all infiniband devices
@@ -104,7 +104,7 @@ def _setupSourcefiles():
       p = Popen( cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE )
       detectedDevices, stderr = p.communicate()
     except subprocess.CalledProcessError as e:
-      collectd.info("infiniband plugin: %s; Error launching '%s'! Disable plugin." % (repr(e), cmd))
+      collectd.info("ib_bw plugin: %s; Error launching '%s'! Disable plugin." % (repr(e), cmd))
       return
     else:
       detectedDevices = detectedDevices.decode('utf-8')
@@ -118,31 +118,31 @@ def _setupSourcefiles():
   ibPortList = []
   for ibDevice in ibDevices:
     if not os.path.isdir( ibDevice + "/ports" ):
-      collectd.info("infiniband plugin: No ports for device %s found" % (ibDevice,))
+      collectd.info("ib_bw plugin: No ports for device %s found" % (ibDevice,))
       continue
 
-    collectd.debug("infiniband plugin: Found device with ports: " + ibDevice)
+    collectd.debug("ib_bw plugin: Found device with ports: " + ibDevice)
 
     cmd = "find " + ibDevice + "/ports/* -maxdepth 0 -type d 2>/dev/null"
     try:
       p = Popen( cmd, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE )
       ibDevicePorts, stderr = p.communicate()
     except subprocess.CalledProcessError as e:
-      collectd.info("infiniband plugin: %s error launching: %s; Disable plugin." % (repr(e), cmd))
+      collectd.info("ib_bw plugin: %s error launching: %s; Disable plugin." % (repr(e), cmd))
       return
     else:
       ibDevicePorts = ibDevicePorts.decode('utf-8')
       
     for ibDevicePort in filter( None, ibDevicePorts.split('\n') ):
       if not os.path.isdir( ibDevicePort + "/counters" ):
-        collectd.info("infiniband plugin: No counters for device port %s found." % (ibDevicePort,))
+        collectd.info("ib_bw plugin: No counters for device port %s found." % (ibDevicePort,))
         continue
 
       ibPortList.append( ibDevicePort )
-      collectd.debug("infiniband plugin: Found port with counters: " + ibDevicePort)
+      collectd.debug("ib_bw plugin: Found port with counters: " + ibDevicePort)
 
   if len(ibPortList) == 0:
-    collectd.info("infiniband plugin: No devices/ports found!" )
+    collectd.info("ib_bw plugin: No devices/ports found!" )
   else:
     enabled = True
 
@@ -152,7 +152,7 @@ def _read_counter(file):
     finput = f.read()
     f.close()
   except IOError as ioe:
-    collectd.error("infiniband plugin: Cannot read %s (%s)" % (file, repr(ioe)) )
+    collectd.error("ib_bw plugin: Cannot read %s (%s)" % (file, repr(ioe)) )
   else:
     return float(finput)
 
@@ -160,25 +160,25 @@ def _read_counter(file):
 
 def ib_plugin_config(config):
   if config.values[0] == 'ib_bw':
-    collectd.info("infiniband plugin: Get configuration")
+    collectd.info("ib_bw plugin: Get configuration")
     for value in config.children:
       if value.key == 'directory':
         global directory
         directory = value.values[0]
-        collectd.info("infiniband plugin: Use directory %s from config file" % (directory,))
+        collectd.info("ib_bw plugin: Use directory %s from config file" % (directory,))
       elif value.key == 'devices':  # InfiniBand devices (comma separated)
         global devices
         devices = value.values[0]
-        collectd.info("infiniband plugin: Use ib_devices %s from config file" % (devices,))
+        collectd.info("ib_bw plugin: Use ib_devices %s from config file" % (devices,))
       elif value.key == 'recheck_limit':
         global recheck_limit
         recheck_limit = int(value.values[0])
         if recheck_limit > 0:
-          collectd.info("infiniband plugin: Check for available IB devices every %d collects" % (recheck_limit,))
+          collectd.info("ib_bw plugin: Check for available IB devices every %d collects" % (recheck_limit,))
       
 
 def ib_plugin_initialize():
-  collectd.debug("infiniband plugin: Initialize ...")
+  collectd.debug("ib_bw plugin: Initialize ...")
 
   # check for perfquery
   global perfquery_filepath
@@ -186,7 +186,7 @@ def ib_plugin_initialize():
     perfquery_filepath = which("perfquery")
 
   if perfquery_filepath:
-    collectd.debug("infiniband plugin: %s is available to reset counters" % (perfquery_filepath,))
+    collectd.debug("ib_bw plugin: %s is available to reset counters" % (perfquery_filepath,))
 
     # add -R option to reset counters
     perfquery_filepath += " -R"
@@ -284,21 +284,32 @@ def ib_plugin_read(data=None):
 def ib_plugin_notify(notification, data=None):
   #collectd.info("infiniband plugin: Notification: %s" % (str(notification),))
 
-  # for severity failure (1), try to re-start plugin
-  if notification.severity == 1 and notification.message == "start":
-    collectd.info("infiniband plugin: Restart ...")
-    try:
-      collectd.unregister_read(ib_plugin_read)
-    except:
-      collectd.error("infiniband plugin: Could not unregister read callback!")
-    ib_plugin_initialize()
+  if notification.plugin is None or notification.plugin == "" or notification.plugin == "ib_bw":
+    global enabled
+    if notification.message == "check":
+      collectd.info("ib_bw plugin: Check IB files ...")
+      _setupSourcefiles()
+      global num_reads
+      num_reads = 0
+    elif notification.message == "disable":
+      collectd.info("ib_bw plugin: Disable reading")
+      enabled = False
+    elif notification.message == "enable":
+      collectd.info("ib_bw plugin: Enable reading")
+      enabled = True
+    elif notification.message == "unregister":
+      collectd.info("ib_bw plugin: Unregister read callback ...")
+      try:
+        collectd.unregister_read(ib_plugin_read)
+      except:
+        collectd.error("ib_bw plugin: Could not unregister read callback!")
+    elif notification.message == "register":
+      collectd.info("ib_bw plugin: Register read callback ...")
+      try:
+        collectd.register_read(ib_plugin_read)
+      except:
+        collectd.error("ib_bw plugin: Could not register read callback!")
 
-  # for severity okay (4)
-  if notification.severity == 4 and notification.message == "check":
-    collectd.info("infiniband plugin: Check IB files ...")
-    _setupSourcefiles()
-    global num_reads
-    num_reads = 0
 
 if __name__ != "__main__":
   # when running inside plugin register each callback

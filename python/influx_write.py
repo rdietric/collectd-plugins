@@ -23,9 +23,9 @@ import subprocess
 import re
 
 try:
-    from influxdb.client import InfluxDBClient
+  from influxdb.client import InfluxDBClient
 except ImportError:
-    InfluxDBClient = None
+  InfluxDBClient = None
 
 influx = None
 
@@ -36,10 +36,11 @@ username = None
 password = None
 database = None # name of the database
 
+conf_batch_size = 200   # number of metrics to be sent in one batch
+conf_cache_size = 2000  # maximum number of metrics to store locally (e.g. if sends fail)
 batch_count = 0
-batch_size = 200   # number of metrics to be sent in one batch
-cache_size = 2000  # maximum number of metrics to store locally (e.g. if sends fail)
 batch = {} # all unsent value lists are stored here
+batch_size = conf_batch_size
 
 store_rates = False
 batch_derive = {} # storage for previous value lists of derived/counter types
@@ -200,6 +201,8 @@ Send data to InfluxDB. Data that cannot be sent will be kept in cache.
 def _send():
   global batch
   global batch_count
+  global batch_derive
+  global batch_size
   #global num_aggregated
 
   if not influx:
@@ -227,15 +230,23 @@ def _send():
   if influx:
     try:
       ret = influx.write_points(metrics, time_precision=time_precision)
-    except Exception as ex:
+    except Exception as ex: # batch could not be sent
       collectd.error("InfluxDB write: error sending metrics(%s)" % (ex,))
-      #raise
+
+      # derived metrics batch is created again from metrics in current batch
+      batch_derive = {} 
+
+      # increase batch size (but not above the configured cache size)
+      batch_size += conf_batch_size
+      if batch_size > conf_cache_size:
+        batch_size = conf_cache_size
 
   # empty batch buffer for successful writes
   if ret:
     #collectd.info("reset batch")
     batch = {}
     batch_count = 0
+    batch_size = conf_batch_size
     #num_aggregated = 0
 
 def _prepare_metrics():
@@ -327,7 +338,7 @@ def _prepare_metrics():
                 # can occur, if we have the same plugin and plugin instance,
                 # but different types (e.g. with the disk plugin)
                 if prevValueList.type == valueList.type:
-                  collectd.warning("InfluxDB write: found a previous value "
+                  collectd.warning("InfluxDB write error: found a previous value "
                     "for this metric with the same timestamp (prev: %s, curr: %s)"
                     % (batch_derive[counterMetricID], valueList) )
                 continue
@@ -416,16 +427,18 @@ def set_config(config):
         global database
         database = value.values[0]
       elif value.key == 'batch_size': 
+        global conf_batch_size
         global batch_size
-        batch_size = _getInteger(value.values[0])
+        conf_batch_size = _getInteger(value.values[0])
+        batch_size = conf_batch_size
       elif value.key == 'cache_size':
-        global cache_size
-        cache_size = _getInteger(value.values[0])
+        global conf_cache_size
+        conf_cache_size = _getInteger(value.values[0])
       elif value.key == 'StoreRates':
         global store_rates
         store_rates = value.values[0]
         if store_rates:
-          collectd.info("InfluxDB write: store rates for derived and counter types")
+          collectd.info("InfluxDB write: store rates for derived/counter types")
       elif value.key == 'PerCore':
         if _setHWThreadMapping():
           global per_core_plugins
@@ -482,6 +495,7 @@ def write(valueList, data=None):
   # check for changed timestamp before sending to make sure that all values in
   # current time period (second) are aggregated
   global batch_count
+  global batch_size
   if currentTimestamp != vlTime:
     currentTimestamp = vlTime
     #collectd.info("InfluxDB write: group time {:d}".format(currentTimestamp))
@@ -490,10 +504,20 @@ def write(valueList, data=None):
       _send()
 
   # Add data to global batch
-  if batch_count <= cache_size:
+  if batch_count <= conf_cache_size:
     if _collect(valueList):
       batch_count += 1
       #collectd.info("batch count: " + str(batch_count))
+  else:
+    collectd.info("InfluxDB write error: Metric cache exceeded. Discarding {:d} metrics".format(batch_count))
+
+    global batch
+    global batch_derive
+    batch = {}
+    batch_count = 0
+    batch_size = conf_batch_size
+    batch_derive = {}
+
   
 def flush(timeout, identifier):
   global batch_count

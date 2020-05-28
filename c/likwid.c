@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE	199309L //required for timespec and nanosleep() in c99
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -6,12 +7,12 @@
 #include <string.h>
 #include <unistd.h>
 #include <float.h>
+#include <time.h>
 
 #include <likwid.h>
 
 #ifdef TEST_LIWKID
 #include <inttypes.h>
-#include <sys/time.h>
 #include <time.h>
 
 #define STATIC_ARRAY_SIZE(a) (sizeof(a) / sizeof(*(a)))
@@ -85,11 +86,11 @@ static bool plugin_disabled = false;
 /*! counter register access mode (default: direct access / perf_event) */
 static int accessMode = 0;
 
-/*! measurement time per group in seconds (default: 10sec) */
-static int mTime = 10;
+/*! measurement time per event/metric group in nanoseconds (default: 10 sec) */
+struct timespec mTime = {10, 0};
 
 /*! measurement time per group in cdtime_t */
-static cdtime_t mcdTime = 0;
+static cdtime_t mTimeCd = 0;
 
 /*! Likwid verbosity output level (default: 1) */
 static int likwid_verbose = 1;
@@ -560,7 +561,7 @@ static int likwid_plugin_read(void) {
     return 0;
   }
 
-  cdtime_t time = cdtime() + mcdTime * numGroups;
+  cdtime_t time = cdtime() + mTimeCd * numGroups;
 
   // read from likwid
   for (int g = 0; g < numGroups; g++) {
@@ -568,7 +569,9 @@ static int likwid_plugin_read(void) {
     if (gid < 0) {
       INFO(PLUGIN_NAME ": No eventset specified for group %s",
            metricGroups[g].name);
-      sleep(mTime);
+      if(-1 == nanosleep(&mTime, NULL)) {
+        WARNING(PLUGIN_NAME ": nanosleep has been interrupted");
+      }
       continue;
     }
 
@@ -580,14 +583,16 @@ static int likwid_plugin_read(void) {
 
     // measure counters for setup group
     perfmon_startCounters();
-    sleep(mTime);
+    if(-1 == nanosleep(&mTime, NULL)) {
+      WARNING(PLUGIN_NAME ": nanosleep has been interrupted");
+    }
     perfmon_stopCounters();
 
     // int nmetrics = perfmon_getNumberOfMetrics(gid);
     int nmetrics = metricGroups[g].numMetrics;
 
-    // INFO(PLUGIN_NAME ": Measured %d metrics for %d CPUs for group %s (%d
-    // sec)", nmetrics, numThreads, metricGroups[g].name, mTime);
+    // INFO(PLUGIN_NAME ": Measured %d metrics for %d CPUs for group %s (%ld.%ld
+    // sec)", nmetrics, numThreads, metricGroups[g].name, mTime.tv_sec, mTime.tv_nsec);
 
     // if we change thread and metric loop order, one physical core array is
     // enough (no array per metric necessary)
@@ -729,7 +734,7 @@ static int likwid_plugin_init(void) {
   // INFO(PLUGIN_NAME ": %s:%d", __FUNCTION__, __LINE__);
 
   // set the cdtime based on the measurement time per group
-  mcdTime = TIME_T_TO_CDTIME_T(mTime);
+  mTimeCd = TIMESPEC_TO_CDTIME_T(&mTime);
 
   int ret = _init_likwid();
 
@@ -748,14 +753,14 @@ severity=okay time=$(date +%s) plugin=likwid message=rstCtrs" | nc -U
 /tmp/pika_collectd.sock
  */
 static int likwid_plugin_notify(const notification_t *type, user_data_t *usr) {
-  if (0 == strncmp(type->plugin, "likwid", 6)) {
+  if (type->plugin == NULL || (0 == strncmp(type->plugin, "likwid", 6))) {
     if (0 == strncmp(type->message, "rstCtrs", 7)) {
       _setCounters();
     } else if (0 == strncmp(type->message, "disable", 7)) {
-      INFO(PLUGIN_NAME ": Disable reading of Likwid metrics");
+      INFO(PLUGIN_NAME ": Disable reading of metrics.");
       plugin_disabled = true;
     } else if (0 == strncmp(type->message, "enable", 6)) {
-      INFO(PLUGIN_NAME ": Enable reading of Likwid metrics");
+      INFO(PLUGIN_NAME ": Enable reading of metrics.");
       plugin_disabled = false;
     }
   }
@@ -783,8 +788,11 @@ static int likwid_plugin_config(const char *key, const char *value) {
   } else if (strcasecmp(key, "AccessMode") == 0) {
     accessMode = atoi(value);
   } else if (strcasecmp(key, "Mtime") == 0) {
-    mTime = atoi(value);
-    INFO(PLUGIN_NAME ": measure each metric group for %d sec\n", mTime);
+    double mtd = strtod(value, NULL);
+    mTime.tv_sec = (time_t)mtd;
+    //mtd += 0.5e-9; // sleep a little less is fine
+    mTime.tv_nsec = (mtd - mTime.tv_sec) * 1000000000L;
+    INFO(PLUGIN_NAME ": measure each metric group for %.3lf sec\n", mtd);
   } else if (strcasecmp(key, "PerCore") == 0) {
     summarizePerCore = true;
   } else if (strcasecmp(key, "Verbose") == 0) {

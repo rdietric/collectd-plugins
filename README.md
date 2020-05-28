@@ -1,19 +1,17 @@
 # Additional Python and C plugins for collectd
-## Read plugins
+Read plugins:
 * LIKWID (C)
-* Infiniband send and receive bandwidth (Python 3)
-* Lustre read and write bandwidth as well as metadata (Python 3)
+* Infiniband bandwidth (sum of send and receive) (Python3)
+* Lustre read/write bandwidth and Lustre metadata (Python3)
 
-## Write Plugins
-* InfluxDB (Python)
+Write Plugins:
+* InfluxDB (Python3)
 
-# Installation (Requirements)
-The plugins have been tested with Collectd 5.10.0, but should also work with other versions. Make sure that Python 3 is available before installing Collectd. If you have an existing Python 3 installation, it should be sufficient to install influxdb via pip3.
+## Installation of Required Tools and C-Plugins
+The plugins have been tested with collectd 5.10.0, but should also work with other versions. Make sure that Python3 is available before installing collectd. If you have an existing Python3 installation, it should be sufficient to install influxdb via pip3.
 
 ## Python
-The Python plugins are written for Python 3. 
-
-Build Python from sources (including InfluxDB):
+The Python plugins are written for Python3. Build Python from sources (including InfluxDB support):
 ~~~~
 PYTHON_VERSION=3.X.X
 
@@ -36,12 +34,12 @@ pip3 install --upgrade pip
 pip3 install influxdb
 ~~~~
 
-## Collectd
-To use the *AlignRead* and *AlignReadOffset* options in the Collectd configuration file, a patch from the patches folder has to be applied. A respective pull request has been opened (https://github.com/collectd/collectd/pull/3327).
+### Collectd
+To use the *AlignRead* and *AlignReadOffset* options in the collectd configuration file, a patch from the patches folder has to be applied. A respective pull request has been opened (https://github.com/collectd/collectd/pull/3327).
 
 If *AlignRead* is set to *true*, the call to read functions is time aligned to a multiple of the read interval, which allows round timestamps or the same timestamps across systems to be recorded. *AlignReadOffset* specifies an offset, in seconds, the call to time-aligned read functions is delayed.
 
-Build collectd from sources:
+Build collectd from sources (including the AlignRead feature):
 ~~~~
 # get collectd sources
 git clone https://github.com/rdietric/collectd.git
@@ -81,11 +79,11 @@ make -j4; make install
 cd ..
 ~~~~
 
-## InfluxDB
+### InfluxDB
 Download a package from https://portal.influxdata.com/downloads/ and install it according to the instructions.
 Add the InfluxDB module to your Python 3 installation with `pip3 install influxdb`
 
-## Plugins
+### Plugins
 Only the C plugin(s) have to be build.
 
 Build Likwid plugin:
@@ -98,15 +96,20 @@ export COLLECTD_BUILD_DIR=/collectd/build/dir
 cd c; make
 ~~~~
 
-# Run collectd
+## Testing
+
+### Singularity Container
+The PIKA data collection can be tested in a singularity container (see [singularity folder](singularity))
+
+### Test collectd
 For testing purposes collectd can be run in foreground with `-f`:
 ~~~~
-$COLLECTD_INSTALL_PATH/sbin/collectd -f -C $PATH_TO_COLLECTD_CONF/collectd.conf
+$COLLECTD_INSTALL_PATH/sbin/collectd -f -C $COLLECTD_CONF_FILE
 ~~~~
 
 There is a sample configuration file for collectd in the top directory of this repo (*pika_collectd.conf*). Before running collectd, paths in this file have to be adapted, e.g. the path to `custom_types.db`, which is needed for the likwid plugin. You should also disable plugins (comment out), where the resources are not available on the system, e.g. lustre and infiniband, if you are working on your own notebook.
 
-## Likwid
+### Likwid Permission Requirements
 If you use Likwid with perf_event as access mode, you may not have permission to collect metrics. 
 If this happens, you can set perf_event_paranoid to 0 (requires root privileges).
 
