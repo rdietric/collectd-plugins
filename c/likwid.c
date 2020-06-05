@@ -239,23 +239,16 @@ static void _setupGroups() {
             numFlopMetrics++;
 
             size_t flopsStrLen = strlen(metrics[m].name);
-
-            // if metric is named exactly like the user-defined normalized FLOPS name, normalization of FLOPS is not needed
-            if (0 == strcmp(normalizedFlopsName, metrics[m].name)) {
-              normalizeFlops = false;
-              metrics[m].xFlops = 0;
-              INFO(PLUGIN_NAME ": Found metric %s. No normalization needed.", metrics[m].name);
-            }
-            // double precision to single precision = factor 2
-            else if (flopsStrLen >= 8 && 0 == strncmp("dp", metrics[m].name + 6, 2)) {
+            if (flopsStrLen >= 8 && 0 == strncmp("dp", metrics[m].name + 6, 2)) {
               metrics[m].xFlops = 2;
             }
             // // avx to single precision = factor 4
             else if (flopsStrLen >= 9 && 0 == strncmp("avx", metrics[m].name + 6, 3)) {
               metrics[m].xFlops = 4;
-            } else // assume single precision otherwise
+            } else // assume single precision or already normalized otherwise
             {
               metrics[m].xFlops = 1;
+              INFO(PLUGIN_NAME ": No normalization needed for %s.", metrics[m].name);
             }
           } else {
             metrics[m].xFlops = 0;
@@ -835,7 +828,7 @@ static int likwid_plugin_config(const char *key, const char *value) {
     while (grp_ptr != NULL) {
       // save group name
       metricGroups[i].name = mystrdup(grp_ptr);
-      INFO(PLUGIN_NAME ": Found group: %s", grp_ptr);
+      INFO(PLUGIN_NAME ": Set group: %s", grp_ptr);
 
       // get next group
       grp_ptr = strtok(NULL, &separator);
@@ -872,7 +865,7 @@ static int likwid_plugin_config(const char *key, const char *value) {
     while (metric_ptr != NULL) {
       // save metric name
       perSocketMetrics[i] = mystrdup(metric_ptr);
-      INFO(PLUGIN_NAME ": Found per socket metric: %s", metric_ptr);
+      INFO(PLUGIN_NAME ": Set per socket metric: %s", metric_ptr);
 
       // get next group
       metric_ptr = strtok(NULL, &separator);

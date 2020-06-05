@@ -107,7 +107,8 @@ For testing purposes collectd can be run in foreground with `-f`:
 $COLLECTD_INSTALL_PATH/sbin/collectd -f -C $COLLECTD_CONF_FILE
 ~~~~
 
-There is a sample configuration file for collectd in the top directory of this repo (*pika_collectd.conf*). Before running collectd, paths in this file have to be adapted, e.g. the path to `custom_types.db`, which is needed for the likwid plugin. You should also disable plugins (comment out), where the resources are not available on the system, e.g. lustre and infiniband, if you are working on your own notebook.
+[pika_collectd.conf](pika_collectd.conf) is a sample configuration file for collectd. 
+Before running collectd, paths in this file have to be adapted, e.g. the path to `custom_types.db`, which is needed for the likwid plugin. You should also disable plugins (comment out), where the resources are not available on the system, e.g. lustre and infiniband, if you are working on your own notebook.
 
 ### Likwid Permission Requirements
 If you use Likwid with perf_event as access mode, you may not have permission to collect metrics. 
